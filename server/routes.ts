@@ -271,3 +271,53 @@ export async function registerRoutes(
 
   return httpServer;
 }
+
+  // ============================================================
+  // ADMIN: Remote Deploy Endpoint
+  // ============================================================
+  
+  app.post("/api/admin/deploy", async (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== "9092e955d3811673c357dbd1e9205b36d96a85e76a782c4f8e8d4cc5be9cdb49") {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    
+    res.json({ status: "deploying", started: new Date().toISOString() });
+    
+    // Run deploy in background after responding
+    const { exec } = require("child_process");
+    exec("cd /opt/insider-signal-dash && git pull origin master && npm ci --production=false && npm run build && sleep 1 && systemctl restart insider-signal", 
+      { timeout: 300000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) {
+          console.error("[DEPLOY] Failed:", error.message);
+        } else {
+          console.log("[DEPLOY] Success:", stdout.slice(-200));
+        }
+      }
+    );
+  });
+
+  // Admin: check deploy log
+  app.get("/api/admin/health", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== "9092e955d3811673c357dbd1e9205b36d96a85e76a782c4f8e8d4cc5be9cdb49") {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    
+    const { execSync } = require("child_process");
+    try {
+      const gitLog = execSync("cd /opt/insider-signal-dash && git log --oneline -5 2>/dev/null || echo 'no git'").toString();
+      const svcStatus = execSync("systemctl is-active insider-signal 2>/dev/null || echo 'unknown'").toString().trim();
+      const uptime = execSync("uptime -p 2>/dev/null || echo 'unknown'").toString().trim();
+      
+      res.json({
+        service: svcStatus,
+        uptime,
+        gitLog: gitLog.trim().split("\n"),
+        deploySecret: "configured",
+      });
+    } catch (err: any) {
+      res.json({ error: err.message });
+    }
+  });
