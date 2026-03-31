@@ -298,7 +298,7 @@ export async function registerRoutes(
     }
     res.json({ status: "deploying", started: new Date().toISOString() });
     const { exec } = require("child_process");
-    exec("cd /opt/insider-signal-dash && git pull origin master && npm install && npm run build && sleep 1 && systemctl restart insider-signal",
+    exec("cd /opt/insider-signal-dash && git pull origin master && npm install --production=false && sleep 1 && systemctl restart insider-signal",
       { timeout: 300000 },
       (error: any, stdout: string, _stderr: string) => {
         if (error) console.error("[DEPLOY] Failed:", error.message);
