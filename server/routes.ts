@@ -313,26 +313,34 @@ export async function registerRoutes(
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
-    const { execSync } = require("child_process");
+    const { exec, execSync } = require("child_process");
     try {
       const DB = "/opt/insider-signal-dash/data.db";
+      // Phase 1: Critical indexes (fast, sync)
       execSync(`sqlite3 ${DB} "
         CREATE INDEX IF NOT EXISTS idx_tx_type_filing_date ON insider_transactions(transaction_type, filing_date);
         CREATE INDEX IF NOT EXISTS idx_tx_accession ON insider_transactions(accession_number);
         CREATE INDEX IF NOT EXISTS idx_tx_ticker ON insider_transactions(issuer_ticker);
-        CREATE INDEX IF NOT EXISTS idx_tx_person_cik ON insider_transactions(reporting_person_cik);
         CREATE INDEX IF NOT EXISTS idx_signals_date ON purchase_signals(signal_date);
         CREATE INDEX IF NOT EXISTS idx_signals_score ON purchase_signals(signal_score);
         CREATE INDEX IF NOT EXISTS idx_signals_tier ON purchase_signals(score_tier);
         CREATE INDEX IF NOT EXISTS idx_entry_prices_signal ON signal_entry_prices(signal_id);
-        CREATE INDEX IF NOT EXISTS idx_fwd_returns_signal_day ON daily_forward_returns(signal_id, trading_day);
-        CREATE INDEX IF NOT EXISTS idx_fwd_returns_day ON daily_forward_returns(trading_day);
         CREATE INDEX IF NOT EXISTS idx_factor_analysis_factor ON factor_analysis(factor_name, horizon);
         CREATE INDEX IF NOT EXISTS idx_exec_deviations_signal ON execution_deviations(signal_id);
         CREATE INDEX IF NOT EXISTS idx_exec_deviations_trade ON execution_deviations(user_trade_id);
       "`, { timeout: 120000 });
       const indexCount = execSync(`sqlite3 ${DB} "SELECT count(*) FROM sqlite_master WHERE type='index';"`, { timeout: 10000 }).toString().trim();
-      res.json({ status: "indexes_created", totalIndexes: indexCount });
+      
+      // Phase 2: Expensive indexes (async, non-blocking)
+      exec(`sqlite3 ${DB} "
+        CREATE INDEX IF NOT EXISTS idx_fwd_returns_signal_day ON daily_forward_returns(signal_id, trading_day);
+        CREATE INDEX IF NOT EXISTS idx_fwd_returns_day ON daily_forward_returns(trading_day);
+      "`, { timeout: 600000 }, (err: any) => {
+        if (err) console.error("[INDEXES] Forward return indexes failed:", err.message);
+        else console.log("[INDEXES] Forward return indexes created");
+      });
+      
+      res.json({ status: "core_indexes_created", totalIndexes: indexCount, note: "Forward return indexes creating in background" });
     } catch (err: any) {
       res.json({ error: err.message });
     }
