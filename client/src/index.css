@@ -1,0 +1,224 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* BLOOMBERG TERMINAL DARK THEME — dark-first for financial dashboards */
+:root {
+  --button-outline: rgba(255,255,255, .08);
+  --badge-outline: rgba(255,255,255, .05);
+  --opaque-button-border-intensity: 6;
+  --elevate-1: rgba(255,255,255, .03);
+  --elevate-2: rgba(255,255,255, .07);
+  --background: 220 15% 6%;
+  --foreground: 210 10% 88%;
+  --border: 220 10% 14%;
+  --card: 220 14% 8%;
+  --card-foreground: 210 10% 88%;
+  --card-border: 220 10% 12%;
+  --sidebar: 220 16% 7%;
+  --sidebar-foreground: 210 10% 88%;
+  --sidebar-border: 220 10% 12%;
+  --sidebar-primary: 37 90% 55%;
+  --sidebar-primary-foreground: 220 15% 6%;
+  --sidebar-accent: 220 10% 12%;
+  --sidebar-accent-foreground: 210 10% 88%;
+  --sidebar-ring: 37 90% 55%;
+  --popover: 220 16% 10%;
+  --popover-foreground: 210 10% 88%;
+  --popover-border: 220 10% 16%;
+  --primary: 37 90% 55%;
+  --primary-foreground: 220 15% 6%;
+  --secondary: 220 10% 14%;
+  --secondary-foreground: 210 10% 82%;
+  --muted: 220 10% 16%;
+  --muted-foreground: 210 6% 50%;
+  --accent: 220 10% 13%;
+  --accent-foreground: 210 10% 88%;
+  --destructive: 0 72% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --input: 220 10% 20%;
+  --ring: 37 90% 55%;
+  /* Chart colors — Bloomberg-inspired */
+  --chart-1: 37 90% 55%;
+  --chart-2: 200 65% 50%;
+  --chart-3: 142 55% 45%;
+  --chart-4: 0 72% 55%;
+  --chart-5: 262 55% 58%;
+  /* Financial semantic colors */
+  --gain: 142 55% 45%;
+  --loss: 0 72% 55%;
+  --neutral: 210 6% 50%;
+  --signal-high: 37 90% 55%;
+  --signal-mid: 200 65% 50%;
+  --signal-low: 210 6% 40%;
+  --font-sans: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-serif: Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  --radius: .375rem;
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+  --shadow: 0 1px 3px rgba(0,0,0,.4);
+  --shadow-md: 0 2px 6px rgba(0,0,0,.4);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.5);
+  --shadow-xl: 0 8px 24px rgba(0,0,0,.5);
+  --shadow-2xl: 0 16px 48px rgba(0,0,0,.6);
+  --tracking-normal: 0.02em;
+  --spacing: 0.25rem;
+
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --primary-border: hsl(var(--primary));
+  --secondary-border: hsl(var(--secondary));
+  --muted-border: hsl(var(--muted));
+  --accent-border: hsl(var(--accent));
+  --destructive-border: hsl(var(--destructive));
+}
+
+/* We only use dark mode */
+.dark {
+  --button-outline: rgba(255,255,255, .08);
+  --badge-outline: rgba(255,255,255, .05);
+  --opaque-button-border-intensity: 6;
+  --elevate-1: rgba(255,255,255, .03);
+  --elevate-2: rgba(255,255,255, .07);
+  --background: 220 15% 6%;
+  --foreground: 210 10% 88%;
+  --border: 220 10% 14%;
+  --card: 220 14% 8%;
+  --card-foreground: 210 10% 88%;
+  --card-border: 220 10% 12%;
+  --sidebar: 220 16% 7%;
+  --sidebar-foreground: 210 10% 88%;
+  --sidebar-border: 220 10% 12%;
+  --sidebar-primary: 37 90% 55%;
+  --sidebar-primary-foreground: 220 15% 6%;
+  --sidebar-accent: 220 10% 12%;
+  --sidebar-accent-foreground: 210 10% 88%;
+  --sidebar-ring: 37 90% 55%;
+  --popover: 220 16% 10%;
+  --popover-foreground: 210 10% 88%;
+  --popover-border: 220 10% 16%;
+  --primary: 37 90% 55%;
+  --primary-foreground: 220 15% 6%;
+  --secondary: 220 10% 14%;
+  --secondary-foreground: 210 10% 82%;
+  --muted: 220 10% 16%;
+  --muted-foreground: 210 6% 50%;
+  --accent: 220 10% 13%;
+  --accent-foreground: 210 10% 88%;
+  --destructive: 0 72% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --input: 220 10% 20%;
+  --ring: 37 90% 55%;
+  --chart-1: 37 90% 55%;
+  --chart-2: 200 65% 50%;
+  --chart-3: 142 55% 45%;
+  --chart-4: 0 72% 55%;
+  --chart-5: 262 55% 58%;
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+  --shadow: 0 1px 3px rgba(0,0,0,.4);
+  --shadow-md: 0 2px 6px rgba(0,0,0,.4);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.5);
+  --shadow-xl: 0 8px 24px rgba(0,0,0,.5);
+  --shadow-2xl: 0 16px 48px rgba(0,0,0,.6);
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --primary-border: hsl(var(--primary));
+  --secondary-border: hsl(var(--secondary));
+  --muted-border: hsl(var(--muted));
+  --accent-border: hsl(var(--accent));
+  --destructive-border: hsl(var(--destructive));
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html, body, #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    @apply font-mono antialiased bg-background text-foreground;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+}
+
+/* Scrollbar styling — Bloomberg-like */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(220 15% 8%);
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(220 10% 20%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(220 10% 28%);
+}
+
+/* Utility classes for financial data */
+.text-gain { color: hsl(var(--gain)); }
+.text-loss { color: hsl(var(--loss)); }
+.text-neutral { color: hsl(var(--neutral)); }
+.bg-gain { background-color: hsl(var(--gain) / 0.12); }
+.bg-loss { background-color: hsl(var(--loss) / 0.12); }
+
+/* Signal score badge colors */
+.signal-high { 
+  background: hsl(var(--signal-high) / 0.15);
+  color: hsl(var(--signal-high));
+  border: 1px solid hsl(var(--signal-high) / 0.3);
+}
+.signal-mid { 
+  background: hsl(var(--signal-mid) / 0.15);
+  color: hsl(var(--signal-mid));
+  border: 1px solid hsl(var(--signal-mid) / 0.3);
+}
+.signal-low { 
+  background: hsl(var(--signal-low) / 0.15);
+  color: hsl(var(--signal-low));
+  border: 1px solid hsl(var(--signal-low) / 0.3);
+}
+
+/* Pulse animation for live indicator */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-live {
+  animation: pulse-live 2s ease-in-out infinite;
+}
+
+/* Table row hover */
+.terminal-row:hover {
+  background: hsl(220 10% 10%);
+}
+
+/* Tooltip styling override */
+[data-radix-tooltip-content] {
+  font-size: 11px !important;
+  letter-spacing: 0.02em;
+  max-width: 320px;
+}
+
+@layer utilities {
+  input[type="search"]::-webkit-search-cancel-button {
+    @apply hidden;
+  }
+  [contenteditable][data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    color: hsl(var(--muted-foreground));
+    pointer-events: none;
+  }
+}
