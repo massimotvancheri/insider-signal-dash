@@ -91,32 +91,30 @@ export async function registerRoutes(
     }
   });
 
-  /** Analytics endpoints — with auto-widen fallback for historical-only data */
+  /** Analytics endpoints — auto-widen fallback (needs ≥10 points for useful charts) */
+  const MIN_CHART_POINTS = 10;
   app.get("/api/analytics/daily-volume", (req, res) => {
-    let days = parseInt(req.query.days as string) || 30;
-    let result = storage.getDailyPurchaseVolume(days);
-    if (result.length === 0) result = storage.getDailyPurchaseVolume(90);
-    if (result.length === 0) result = storage.getDailyPurchaseVolume(365);
-    if (result.length === 0) result = storage.getDailyPurchaseVolume(36500);
-    res.json(result);
+    const days = parseInt(req.query.days as string) || 30;
+    for (const d of [days, 90, 365, 36500]) {
+      const result = storage.getDailyPurchaseVolume(d);
+      if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
+    }
   });
 
   app.get("/api/analytics/cluster-buys", (req, res) => {
-    let days = parseInt(req.query.days as string) || 30;
-    let result = storage.getClusterBuys(days);
-    if (result.length === 0) result = storage.getClusterBuys(90);
-    if (result.length === 0) result = storage.getClusterBuys(365);
-    if (result.length === 0) result = storage.getClusterBuys(36500);
-    res.json(result);
+    const days = parseInt(req.query.days as string) || 30;
+    for (const d of [days, 90, 365, 36500]) {
+      const result = storage.getClusterBuys(d);
+      if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
+    }
   });
 
   app.get("/api/analytics/insider-types", (req, res) => {
-    let days = parseInt(req.query.days as string) || 30;
-    let result = storage.getInsiderTypeBreakdown(days);
-    if (result.length === 0) result = storage.getInsiderTypeBreakdown(90);
-    if (result.length === 0) result = storage.getInsiderTypeBreakdown(365);
-    if (result.length === 0) result = storage.getInsiderTypeBreakdown(36500);
-    res.json(result);
+    const days = parseInt(req.query.days as string) || 30;
+    for (const d of [days, 90, 365, 36500]) {
+      const result = storage.getInsiderTypeBreakdown(d);
+      if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
+    }
   });
 
   // ============================================================
