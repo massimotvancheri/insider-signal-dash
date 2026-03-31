@@ -306,5 +306,24 @@ export async function registerRoutes(
     }
   });
 
+
+  // Admin: database cleanup
+  app.post("/api/admin/cleanup", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { execSync } = require("child_process");
+    try {
+      const before = execSync("sqlite3 /opt/insider-signal-dash/data.db \"SELECT count(*) FROM insider_transactions WHERE transaction_type='P';\"").toString().trim();
+      execSync("sqlite3 /opt/insider-signal-dash/data.db \"DELETE FROM insider_transactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM insider_transactions GROUP BY accession_number, reporting_person_cik, transaction_date, shares_traded);\"", { timeout: 120000 });
+      execSync("sqlite3 /opt/insider-signal-dash/data.db \"DELETE FROM purchase_signals WHERE rowid NOT IN (SELECT MIN(rowid) FROM purchase_signals GROUP BY issuer_ticker, signal_date);\"", { timeout: 120000 });
+      const after = execSync("sqlite3 /opt/insider-signal-dash/data.db \"SELECT count(*) FROM insider_transactions WHERE transaction_type='P';\"").toString().trim();
+      res.json({ before, after, status: "cleaned" });
+    } catch (err: any) {
+      res.json({ error: err.message });
+    }
+  });
+
   return httpServer;
 }
