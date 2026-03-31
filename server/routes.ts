@@ -75,32 +75,48 @@ export async function registerRoutes(
     res.json(getScoredSignals(limit, minScore));
   });
 
-  /** Transactions feed */
+  /** Transactions feed — with auto-widen fallback */
   app.get("/api/transactions", (req, res) => {
     const limit = parseInt(req.query.limit as string) || 100;
     const type = req.query.type as string;
     const days = parseInt(req.query.days as string) || 30;
     if (type === "P") {
-      res.json(storage.getPurchaseTransactions(limit, days));
+      let result = storage.getPurchaseTransactions(limit, days);
+      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 90);
+      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 365);
+      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 36500);
+      res.json(result);
     } else {
       res.json(storage.getTransactions(limit));
     }
   });
 
-  /** Analytics endpoints */
+  /** Analytics endpoints — with auto-widen fallback for historical-only data */
   app.get("/api/analytics/daily-volume", (req, res) => {
-    const days = parseInt(req.query.days as string) || 30;
-    res.json(storage.getDailyPurchaseVolume(days));
+    let days = parseInt(req.query.days as string) || 30;
+    let result = storage.getDailyPurchaseVolume(days);
+    if (result.length === 0) result = storage.getDailyPurchaseVolume(90);
+    if (result.length === 0) result = storage.getDailyPurchaseVolume(365);
+    if (result.length === 0) result = storage.getDailyPurchaseVolume(36500);
+    res.json(result);
   });
 
   app.get("/api/analytics/cluster-buys", (req, res) => {
-    const days = parseInt(req.query.days as string) || 30;
-    res.json(storage.getClusterBuys(days));
+    let days = parseInt(req.query.days as string) || 30;
+    let result = storage.getClusterBuys(days);
+    if (result.length === 0) result = storage.getClusterBuys(90);
+    if (result.length === 0) result = storage.getClusterBuys(365);
+    if (result.length === 0) result = storage.getClusterBuys(36500);
+    res.json(result);
   });
 
   app.get("/api/analytics/insider-types", (req, res) => {
-    const days = parseInt(req.query.days as string) || 30;
-    res.json(storage.getInsiderTypeBreakdown(days));
+    let days = parseInt(req.query.days as string) || 30;
+    let result = storage.getInsiderTypeBreakdown(days);
+    if (result.length === 0) result = storage.getInsiderTypeBreakdown(90);
+    if (result.length === 0) result = storage.getInsiderTypeBreakdown(365);
+    if (result.length === 0) result = storage.getInsiderTypeBreakdown(36500);
+    res.json(result);
   });
 
   // ============================================================
