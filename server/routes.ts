@@ -24,6 +24,7 @@ export async function registerRoutes(
 
   /** Dashboard summary KPIs */
   app.get("/api/dashboard", (_req, res) => {
+    try {
     // Try recent data first, fall back to all-time for historical-only mode
     let purchaseCount30d = storage.getPurchaseCount(30);
     let purchaseCount7d = storage.getPurchaseCount(7);
@@ -61,6 +62,10 @@ export async function registerRoutes(
       },
       pollingStatus,
     });
+    } catch (err: any) {
+      console.error("[/api/dashboard ERROR]", err.message);
+      res.status(500).json({ error: err.message });
+    }
   });
 
   /** Scored signals feed with factor breakdowns */
