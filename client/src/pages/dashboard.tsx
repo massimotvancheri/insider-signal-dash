@@ -1475,10 +1475,10 @@ export default function Dashboard() {
         <div className="flex items-center gap-4">
           <MetricTooltip title="Data Feed Status" description="Real-time polling of SEC EDGAR for new Form 4 filings.">
             <div className="flex items-center gap-2 cursor-help" data-testid="status-indicator">
-              <div className={`w-1.5 h-1.5 rounded-full ${pollingStatus?.isActive ? "bg-green-500 animate-pulse-live" : "bg-red-500"}`} />
+              <div className={`w-1.5 h-1.5 rounded-full ${(pollingStatus?.active || pollingStatus?.isActive) ? "bg-green-500 animate-pulse-live" : "bg-red-500"}`} />
               <span className="text-[10px] text-muted-foreground">
-                {pollingStatus?.isActive ? "LIVE" : "OFFLINE"}
-                {pollingStatus?.lastPollTime ? ` · ${timeAgo(pollingStatus.lastPollTime)}` : ""}
+                {(pollingStatus?.active || pollingStatus?.isActive) ? "LIVE" : "OFFLINE"}
+                {pollingStatus?.stats?.uptime ? ` · ${pollingStatus.stats.uptime}` : pollingStatus?.lastPollTime ? ` · ${timeAgo(pollingStatus.lastPollTime)}` : ""}
               </span>
             </div>
           </MetricTooltip>
@@ -1486,7 +1486,7 @@ export default function Dashboard() {
           <MetricTooltip title="Total Filings" description="Cumulative Form 4 filings parsed and stored.">
             <div className="flex items-center gap-1.5 cursor-help">
               <Database className="w-3 h-3 text-muted-foreground" />
-              <span className="text-[10px] text-muted-foreground">{formatNumber(pollingStatus?.totalFilingsProcessed || 0)} filings</span>
+              <span className="text-[10px] text-muted-foreground">{formatNumber(pollingStatus?.stats?.eftsPolls || pollingStatus?.totalFilingsProcessed || 0)} polls</span>
             </div>
           </MetricTooltip>
 
