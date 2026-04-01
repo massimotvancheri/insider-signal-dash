@@ -468,6 +468,24 @@ export async function registerRoutes(
     );
   });
 
+  // Admin: read recent service logs
+  app.get("/api/admin/logs", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    const lines = parseInt(req.query.lines as string) || 50;
+    const grep = req.query.grep ? `| grep -i '${(req.query.grep as string).replace(/'/g, '')}'` : '';
+    exec(`journalctl -u insider-signal --no-pager -n ${lines} ${grep}`,
+      { timeout: 10000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) return res.json({ error: error.message, stderr });
+        res.json({ logs: stdout.split('\n').slice(-lines) });
+      }
+    );
+  });
+
   // Admin: setup systemd override for index creation on restart
   app.post("/api/admin/setup-systemd", (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
