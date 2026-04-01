@@ -287,7 +287,7 @@ export async function registerRoutes(
   // ADMIN: Remote Deploy & Health
   // ============================================================
 
-  const DEPLOY_SECRET = "9092e955d3811673c357dbd1e9205b36d96a85e76a782c4f8e8d4cc5be9cdb49";
+  const DEPLOY_SECRET = process.env.DEPLOY_SECRET || "9092e955d3811673c357dbd1e9205b36d96a85e76a782c4f8e8d4cc5be9cdb49";
 
   app.post("/api/admin/deploy", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
@@ -358,6 +358,131 @@ export async function registerRoutes(
     } catch (err: any) {
       res.json({ error: err.message });
     }
+  });
+
+  // Admin: enrich prices
+  app.post("/api/admin/enrich", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    exec("python3 scripts/enrich-prices.py 5000 2020", { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[ENRICH] Failed:", error.message);
+        if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
+        if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
+      }
+    );
+    res.json({ status: "enrichment_started" });
+  });
+
+  // Admin: backfill SEC data
+  app.post("/api/admin/backfill", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const startYear = req.body?.startYear || 2026;
+    const { exec } = require("child_process");
+    exec(`npx tsx server/sec-backfill.ts ${startYear}`, { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[BACKFILL] Failed:", error.message);
+        if (stdout) console.log("[BACKFILL] stdout:", stdout.slice(-500));
+        if (stderr) console.error("[BACKFILL] stderr:", stderr.slice(-500));
+      }
+    );
+    res.json({ status: "backfill_started", startYear });
+  });
+
+  // Admin: run factor research
+  app.post("/api/admin/factor-research", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    exec("python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[FACTOR-RESEARCH] Failed:", error.message);
+        if (stdout) console.log("[FACTOR-RESEARCH] stdout:", stdout.slice(-500));
+        if (stderr) console.error("[FACTOR-RESEARCH] stderr:", stderr.slice(-500));
+      }
+    );
+    res.json({ status: "factor_research_started" });
+  });
+
+  // Admin: backup database to GCS
+  app.post("/api/admin/backup", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    exec('sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db" && gsutil cp /tmp/insider-signal-backup.db gs://insider-signal-deploys/backups/data-$(date +%Y%m%d-%H%M%S).db && rm /tmp/insider-signal-backup.db',
+      { timeout: 300000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[BACKUP] Failed:", error.message);
+        if (stdout) console.log("[BACKUP] stdout:", stdout.slice(-500));
+        if (stderr) console.error("[BACKUP] stderr:", stderr.slice(-500));
+      }
+    );
+    res.json({ status: "backup_started" });
+  });
+
+  // Admin: setup systemd override for index creation on restart
+  app.post("/api/admin/setup-systemd", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    exec(`mkdir -p /etc/systemd/system/insider-signal.service.d && cat > /etc/systemd/system/insider-signal.service.d/indexes.conf << 'CONF'
+[Service]
+ExecStartPost=/bin/bash /opt/insider-signal-dash/script/create-indexes.sh
+CONF
+systemctl daemon-reload`,
+      { timeout: 30000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[SETUP-SYSTEMD] Failed:", error.message);
+        if (stdout) console.log("[SETUP-SYSTEMD] stdout:", stdout);
+        if (stderr) console.error("[SETUP-SYSTEMD] stderr:", stderr);
+      }
+    );
+    res.json({ status: "systemd_setup_started" });
+  });
+
+  // Admin: fix deploy cron script
+  app.post("/api/admin/fix-deploy-cron", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    const deployScript = `#!/bin/bash
+cd /opt/insider-signal-dash
+git fetch origin master 2>/dev/null
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/master)
+if [ "$LOCAL" != "$REMOTE" ]; then
+  echo "$(date) - Deploying: $LOCAL -> $REMOTE"
+  git pull origin master
+  systemctl restart insider-signal
+  echo "$(date) - Deploy complete"
+fi
+`;
+    exec(`cat > /opt/deploy.sh << 'DEPLOYSCRIPT'
+${deployScript.trim()}
+DEPLOYSCRIPT
+chmod +x /opt/deploy.sh`,
+      { timeout: 10000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) console.error("[FIX-DEPLOY-CRON] Failed:", error.message);
+        if (stdout) console.log("[FIX-DEPLOY-CRON] stdout:", stdout);
+        if (stderr) console.error("[FIX-DEPLOY-CRON] stderr:", stderr);
+      }
+    );
+    res.json({ status: "deploy_cron_fixed" });
   });
 
   // Admin: database cleanup
