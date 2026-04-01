@@ -419,15 +419,53 @@ export async function registerRoutes(
       return res.status(401).json({ error: "unauthorized" });
     }
     const { exec } = require("child_process");
-    exec(`sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db" && TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])") && DEST="backups/data-$(date +%Y%m%d-%H%M%S).db" && curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST" > /dev/null && rm /tmp/insider-signal-backup.db && echo "Backed up to gs://insider-signal-deploys/$DEST"`,
-      { timeout: 300000 },
+    const backupScript = [
+      'set -e',
+      'sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db"',
+      'echo "STEP1: SQLite backup done, size=$(du -h /tmp/insider-signal-backup.db | cut -f1)"',
+      'TOKEN_JSON=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")',
+      'echo "STEP2: Token response: $TOKEN_JSON"',
+      'TOKEN=$(echo "$TOKEN_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin)[\'access_token\'])")',
+      'echo "STEP3: Got token"',
+      'DEST="backups/data-$(date +%Y%m%d-%H%M%S).db"',
+      'RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST")',
+      'echo "STEP4: Upload response: $RESP"',
+      'rm -f /tmp/insider-signal-backup.db',
+      'echo "DONE: Backed up to gs://insider-signal-deploys/$DEST"',
+    ].join('\n');
+    exec(backupScript,
+      { timeout: 300000, shell: "/bin/bash" },
       (error: any, stdout: string, stderr: string) => {
         if (error) console.error("[BACKUP] Failed:", error.message);
-        if (stdout) console.log("[BACKUP] stdout:", stdout.slice(-500));
-        if (stderr) console.error("[BACKUP] stderr:", stderr.slice(-500));
+        if (stdout) console.log("[BACKUP] stdout:", stdout.slice(-1000));
+        if (stderr) console.error("[BACKUP] stderr:", stderr.slice(-1000));
       }
     );
     res.json({ status: "backup_started" });
+  });
+
+  // Admin: test GCS access (diagnostic)
+  app.get("/api/admin/test-gcs", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { exec } = require("child_process");
+    const testCmd = [
+      'TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)[\'access_token\'])")',
+      'curl -s -H "Authorization: Bearer $TOKEN" "https://storage.googleapis.com/storage/v1/b/insider-signal-deploys?fields=name,timeCreated"',
+    ].join(' && ');
+    exec(testCmd,
+      { timeout: 30000, shell: "/bin/bash" },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) return res.json({ error: error.message, stderr });
+        try {
+          res.json({ gcsAccess: JSON.parse(stdout), status: "ok" });
+        } catch {
+          res.json({ rawResponse: stdout, stderr, status: "parse_error" });
+        }
+      }
+    );
   });
 
   // Admin: setup systemd override for index creation on restart
