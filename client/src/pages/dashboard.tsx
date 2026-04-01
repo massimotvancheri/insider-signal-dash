@@ -701,6 +701,20 @@ function PortfolioTab() {
     refetchInterval: 30000,
   });
 
+  const { data: schwabPositions } = useQuery<any[]>({
+    queryKey: ["/api/schwab/positions"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/schwab/positions");
+      return res.json();
+    },
+    refetchInterval: 60000,
+    retry: false,
+  });
+
+  const { data: schwabStatus } = useQuery<any>({
+    queryKey: ["/api/schwab/status"],
+  });
+
   const { data: closedTrades } = useQuery<any[]>({
     queryKey: ["/api/portfolio/closed-trades"],
     queryFn: async () => {
@@ -832,6 +846,46 @@ function PortfolioTab() {
         </div>
       </div>
 
+      {/* Schwab Live Positions */}
+      {schwabStatus?.isConnected && schwabPositions && schwabPositions.length > 0 && (
+        <div className="bg-card border border-border rounded-md p-3">
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+            Schwab Live Positions
+            <span className="ml-2 text-[9px] text-green-400">LIVE</span>
+          </h3>
+          <div className="overflow-auto" style={{ overscrollBehavior: "contain" }}>
+            <table className="w-full text-[11px]" data-testid="schwab-positions-table">
+              <thead className="sticky top-0 bg-card z-10">
+                <tr className="border-b border-border text-muted-foreground">
+                  <th className="text-left py-1.5 px-2 font-medium">TICKER</th>
+                  <th className="text-left py-1.5 px-2 font-medium">DESCRIPTION</th>
+                  <th className="text-left py-1.5 px-2 font-medium">TYPE</th>
+                  <th className="text-right py-1.5 px-2 font-medium">QTY</th>
+                  <th className="text-right py-1.5 px-2 font-medium">AVG PRICE</th>
+                  <th className="text-right py-1.5 px-2 font-medium">MKT VALUE</th>
+                  <th className="text-right py-1.5 px-2 font-medium">DAY P&L</th>
+                  <th className="text-right py-1.5 px-2 font-medium">DAY %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schwabPositions.map((pos: any, i: number) => (
+                  <tr key={i} className="terminal-row border-b border-border/30">
+                    <td className="py-1.5 px-2 font-bold text-primary">{pos.ticker}</td>
+                    <td className="py-1.5 px-2 text-foreground truncate max-w-[160px]">{pos.description}</td>
+                    <td className="py-1.5 px-2 text-muted-foreground text-[10px]">{pos.assetType}</td>
+                    <td className="py-1.5 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{formatNumber(pos.quantity)}</td>
+                    <td className="py-1.5 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>${pos.averagePrice?.toFixed(2)}</td>
+                    <td className="py-1.5 px-2 text-right font-medium" style={{ fontVariantNumeric: "tabular-nums" }}>{formatCurrency(pos.marketValue)}</td>
+                    <td className={`py-1.5 px-2 text-right font-medium ${pnlColor(pos.currentDayPnl)}`} style={{ fontVariantNumeric: "tabular-nums" }}>{formatCurrency(pos.currentDayPnl)}</td>
+                    <td className={`py-1.5 px-2 text-right ${pnlColor(pos.currentDayPnlPct)}`} style={{ fontVariantNumeric: "tabular-nums" }}>{formatPct(pos.currentDayPnlPct)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Closed Trades */}
       <div className="bg-card border border-border rounded-md p-3">
         <MetricTooltip title="Closed Trades" description="Completed round-trip trades with realized P&L and signal attribution.">
@@ -954,7 +1008,23 @@ function PerformanceTab() {
     refetchInterval: 60000,
   });
 
+  const { data: schwabPositions } = useQuery<any[]>({
+    queryKey: ["/api/schwab/positions"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/schwab/positions");
+      return res.json();
+    },
+    refetchInterval: 120000,
+    retry: false,
+  });
+
+  const { data: schwabStatus } = useQuery<any>({
+    queryKey: ["/api/schwab/status"],
+  });
+
   const m = summary || {};
+  const schwabTotalValue = schwabPositions?.reduce((sum: number, p: any) => sum + (p.marketValue || 0), 0) || 0;
+  const schwabDayPnl = schwabPositions?.reduce((sum: number, p: any) => sum + (p.currentDayPnl || 0), 0) || 0;
 
   return (
     <div className="space-y-3">
@@ -1036,6 +1106,34 @@ function PerformanceTab() {
           ))}
         </div>
       </div>
+
+      {/* Schwab Account Summary */}
+      {schwabStatus?.isConnected && schwabPositions && schwabPositions.length > 0 && (
+        <div className="bg-card border border-border rounded-md p-3">
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">
+            Schwab Account Summary
+            <span className="ml-2 text-[9px] text-green-400">LIVE</span>
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-background rounded border border-border/50 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Portfolio Value</div>
+              <div className="text-base font-bold text-foreground mt-1" style={{ fontVariantNumeric: "tabular-nums" }}>{formatCurrency(schwabTotalValue)}</div>
+            </div>
+            <div className="bg-background rounded border border-border/50 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Day P&L</div>
+              <div className={`text-base font-bold mt-1 ${pnlColor(schwabDayPnl)}`} style={{ fontVariantNumeric: "tabular-nums" }}>{formatCurrency(schwabDayPnl)}</div>
+            </div>
+            <div className="bg-background rounded border border-border/50 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Positions</div>
+              <div className="text-base font-bold text-foreground mt-1" style={{ fontVariantNumeric: "tabular-nums" }}>{schwabPositions.length}</div>
+            </div>
+            <div className="bg-background rounded border border-border/50 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Account</div>
+              <div className="text-base font-bold text-foreground mt-1">{schwabStatus.accountNumber || "—"}</div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1070,6 +1168,20 @@ function ExecutionTab() {
       return res.json();
     },
     refetchInterval: 120000,
+  });
+
+  const { data: schwabOrders } = useQuery<any[]>({
+    queryKey: ["/api/schwab/orders"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/schwab/orders");
+      return res.json();
+    },
+    refetchInterval: 120000,
+    retry: false,
+  });
+
+  const { data: schwabStatus } = useQuery<any>({
+    queryKey: ["/api/schwab/status"],
   });
 
   const s = execSummary || {};
@@ -1214,6 +1326,63 @@ function ExecutionTab() {
           )}
         </div>
       </div>
+
+      {/* Schwab Order History */}
+      {schwabStatus?.isConnected && schwabOrders && schwabOrders.length > 0 && (
+        <div className="bg-card border border-border rounded-md p-3">
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+            Schwab Order History (60D)
+            <span className="ml-2 text-[9px] text-green-400">LIVE</span>
+          </h3>
+          <div className="overflow-auto max-h-56" style={{ overscrollBehavior: "contain" }}>
+            <table className="w-full text-[11px]" data-testid="schwab-orders-table">
+              <thead className="sticky top-0 bg-card z-10">
+                <tr className="border-b border-border text-muted-foreground">
+                  <th className="text-left py-1.5 px-2 font-medium">DATE</th>
+                  <th className="text-left py-1.5 px-2 font-medium">SIDE</th>
+                  <th className="text-left py-1.5 px-2 font-medium">TICKER</th>
+                  <th className="text-right py-1.5 px-2 font-medium">QTY</th>
+                  <th className="text-right py-1.5 px-2 font-medium">PRICE</th>
+                  <th className="text-left py-1.5 px-2 font-medium">STATUS</th>
+                  <th className="text-left py-1.5 px-2 font-medium">TYPE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schwabOrders.map((order: any, i: number) => {
+                  const legs = order.orderLegCollection || [];
+                  const leg = legs[0] || {};
+                  const ticker = leg.instrument?.symbol || "—";
+                  const side = leg.instruction || "—";
+                  const qty = order.filledQuantity || order.quantity || 0;
+                  const price = order.price || order.stopPrice || 0;
+                  const status = order.status || "—";
+                  const date = order.closeTime || order.enteredTime || "";
+                  const dateStr = date ? new Date(date).toLocaleDateString() : "—";
+                  return (
+                    <tr key={i} className="terminal-row border-b border-border/30">
+                      <td className="py-1 px-2 text-muted-foreground">{dateStr}</td>
+                      <td className="py-1 px-2">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${side === "BUY" ? "bg-gain text-[hsl(142,55%,15%)]" : "bg-loss text-[hsl(0,72%,15%)]"}`}>
+                          {side}
+                        </span>
+                      </td>
+                      <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
+                      <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{qty}</td>
+                      <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>${price.toFixed(2)}</td>
+                      <td className="py-1 px-2">
+                        <span className={`text-[10px] ${status === "FILLED" ? "text-green-400" : status === "CANCELED" ? "text-red-400" : "text-muted-foreground"}`}>
+                          {status}
+                        </span>
+                      </td>
+                      <td className="py-1 px-2 text-muted-foreground text-[10px]">{order.orderType || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1223,6 +1392,15 @@ function ExecutionTab() {
 // TAB 6: SETTINGS
 // ====================================================================
 function SettingsTab() {
+  const [appKey, setAppKey] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const [oauthStep, setOauthStep] = useState<"idle" | "waiting_redirect" | "exchanging" | "done">("idle");
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
+
+  const CALLBACK_URL = "https://127.0.0.1";
+
   const { data: schwabStatus } = useQuery<any>({
     queryKey: ["/api/schwab/status"],
     refetchInterval: 30000,
@@ -1244,6 +1422,84 @@ function SettingsTab() {
       return res.json();
     },
   });
+
+  const handleConnect = async () => {
+    setOauthError(null);
+    if (!appKey.trim() || !appSecret.trim()) {
+      setOauthError("Both App Key and App Secret are required.");
+      return;
+    }
+    try {
+      const res = await apiRequest("POST", "/api/schwab/configure", { appKey: appKey.trim(), appSecret: appSecret.trim(), callbackUrl: CALLBACK_URL });
+      const data = await res.json();
+      if (data.authUrl) {
+        window.open(data.authUrl, "_blank");
+        setOauthStep("waiting_redirect");
+      }
+    } catch (err: any) {
+      setOauthError(err.message || "Failed to configure Schwab.");
+    }
+  };
+
+  const handleCallback = async () => {
+    setOauthError(null);
+    if (!redirectUrl.trim()) {
+      setOauthError("Please paste the redirect URL from your browser.");
+      return;
+    }
+    // Extract code parameter from URL
+    let code = "";
+    try {
+      const match = redirectUrl.match(/code=([^&]+)/);
+      if (match) {
+        code = decodeURIComponent(match[1]);
+        // Ensure code ends with @
+        if (!code.endsWith("@")) code += "@";
+      }
+    } catch {
+      // fallback: try as plain code
+      code = redirectUrl.trim();
+    }
+    if (!code) {
+      setOauthError("Could not extract authorization code from the URL. Make sure you copied the full URL.");
+      return;
+    }
+    setOauthStep("exchanging");
+    try {
+      const res = await apiRequest("POST", "/api/schwab/callback", { code, callbackUrl: CALLBACK_URL });
+      const data = await res.json();
+      if (data.success) {
+        setOauthStep("done");
+        setRedirectUrl("");
+        queryClient.invalidateQueries({ queryKey: ["/api/schwab/status"] });
+      } else {
+        setOauthError(data.error || "Token exchange failed.");
+        setOauthStep("waiting_redirect");
+      }
+    } catch (err: any) {
+      setOauthError(err.message || "Token exchange failed.");
+      setOauthStep("waiting_redirect");
+    }
+  };
+
+  const handleSync = async () => {
+    setSyncStatus("syncing");
+    try {
+      const res = await apiRequest("POST", "/api/schwab/sync");
+      const data = await res.json();
+      if (data.success) {
+        setSyncStatus(`Synced ${data.syncedPositions} positions`);
+        queryClient.invalidateQueries({ queryKey: ["/api/schwab/status"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/portfolio/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/schwab/positions"] });
+      } else {
+        setSyncStatus(`Error: ${data.error}`);
+      }
+    } catch (err: any) {
+      setSyncStatus(`Error: ${err.message}`);
+    }
+    setTimeout(() => setSyncStatus(null), 5000);
+  };
 
   const ps = pipelineStatus || {};
   const enrichedCount = ps.enrichedSignals ?? ps.signalsEnriched ?? 0;
@@ -1301,34 +1557,102 @@ function SettingsTab() {
               </li>
               <li className="flex gap-2">
                 <span className="text-primary font-bold shrink-0">5.</span>
-                <span>Once connected, the dashboard will automatically sync your positions and order history every 5 minutes</span>
+                <span>After authorizing, copy the full redirect URL and paste it below to complete the connection</span>
               </li>
             </ol>
           </div>
 
-          {/* API Key Fields */}
+          {/* API Key Fields — actual inputs */}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1 block">App Key</label>
-              <div className="bg-background border border-border rounded px-3 py-2 text-[11px] text-muted-foreground">
-                {schwabStatus?.isConnected ? "••••••••••••" : "Enter your Schwab App Key"}
-              </div>
+              <input
+                type="text"
+                value={appKey}
+                onChange={(e) => setAppKey(e.target.value)}
+                placeholder={schwabStatus?.isConnected ? "••••••••••••" : "Enter your Schwab App Key"}
+                className="w-full bg-background border border-border rounded px-3 py-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+                data-testid="schwab-app-key"
+              />
             </div>
             <div>
               <label className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1 block">App Secret</label>
-              <div className="bg-background border border-border rounded px-3 py-2 text-[11px] text-muted-foreground">
-                {schwabStatus?.isConnected ? "••••••••••••" : "Enter your Schwab App Secret"}
-              </div>
+              <input
+                type="password"
+                value={appSecret}
+                onChange={(e) => setAppSecret(e.target.value)}
+                placeholder={schwabStatus?.isConnected ? "••••••••••••" : "Enter your Schwab App Secret"}
+                className="w-full bg-background border border-border rounded px-3 py-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+                data-testid="schwab-app-secret"
+              />
             </div>
           </div>
 
+          {/* Redirect URL field — shown after clicking Connect */}
+          {(oauthStep === "waiting_redirect" || oauthStep === "exchanging") && (
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1 block">
+                Paste the redirect URL here
+              </label>
+              <p className="text-[10px] text-muted-foreground mb-1">
+                After authorizing on Schwab, you'll be redirected to a page that says "can't be reached". Copy the <span className="text-primary">full URL</span> from your browser's address bar and paste it below.
+              </p>
+              <input
+                type="text"
+                value={redirectUrl}
+                onChange={(e) => setRedirectUrl(e.target.value)}
+                placeholder="https://127.0.0.1?code=...&session=..."
+                className="w-full bg-background border border-border rounded px-3 py-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+                data-testid="schwab-redirect-url"
+              />
+              <button
+                onClick={handleCallback}
+                disabled={oauthStep === "exchanging"}
+                className="mt-2 bg-green-600 text-white text-[11px] font-bold px-4 py-2 rounded hover:opacity-90 transition-opacity disabled:opacity-50"
+                data-testid="schwab-submit-code"
+              >
+                {oauthStep === "exchanging" ? "Exchanging token..." : "Complete Connection"}
+              </button>
+            </div>
+          )}
+
+          {/* Error message */}
+          {oauthError && (
+            <div className="p-2 bg-red-500/10 border border-red-500/30 rounded text-[11px] text-red-400">
+              {oauthError}
+            </div>
+          )}
+
+          {/* Success message */}
+          {oauthStep === "done" && (
+            <div className="p-2 bg-green-500/10 border border-green-500/30 rounded text-[11px] text-green-400">
+              Schwab account connected successfully!
+            </div>
+          )}
+
+          {/* Sync status */}
+          {syncStatus && (
+            <div className={`p-2 rounded text-[11px] ${syncStatus.startsWith("Error") ? "bg-red-500/10 border border-red-500/30 text-red-400" : "bg-green-500/10 border border-green-500/30 text-green-400"}`}>
+              {syncStatus === "syncing" ? "Syncing positions..." : syncStatus}
+            </div>
+          )}
+
           <div className="flex gap-2">
-            <button className="bg-primary text-primary-foreground text-[11px] font-bold px-4 py-2 rounded hover:opacity-90 transition-opacity" data-testid="schwab-connect-btn">
+            <button
+              onClick={handleConnect}
+              className="bg-primary text-primary-foreground text-[11px] font-bold px-4 py-2 rounded hover:opacity-90 transition-opacity"
+              data-testid="schwab-connect-btn"
+            >
               {schwabStatus?.isConnected ? "Reconnect" : "Connect Schwab Account"}
             </button>
             {schwabStatus?.isConnected && (
-              <button className="bg-muted text-muted-foreground text-[11px] px-4 py-2 rounded hover:bg-muted/80 transition-colors" data-testid="schwab-sync-btn">
-                Sync Now
+              <button
+                onClick={handleSync}
+                disabled={syncStatus === "syncing"}
+                className="bg-muted text-muted-foreground text-[11px] px-4 py-2 rounded hover:bg-muted/80 transition-colors disabled:opacity-50"
+                data-testid="schwab-sync-btn"
+              >
+                {syncStatus === "syncing" ? "Syncing..." : "Sync Now"}
               </button>
             )}
           </div>

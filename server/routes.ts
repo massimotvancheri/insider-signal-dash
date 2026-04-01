@@ -278,6 +278,167 @@ export async function registerRoutes(
     }
   });
 
+  /** Refresh Schwab access token using refresh token */
+  async function refreshSchwabToken(): Promise<boolean> {
+    const config = storage.getSchwabConfig();
+    if (!config?.refreshToken || !config?.appKey || !config?.appSecret) return false;
+    try {
+      const basicAuth = Buffer.from(`${config.appKey}:${config.appSecret}`).toString("base64");
+      const resp = await fetch("https://api.schwabapi.com/v1/oauth/token", {
+        method: "POST",
+        headers: { "Authorization": `Basic ${basicAuth}`, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: config.refreshToken }),
+      });
+      if (!resp.ok) {
+        console.error("[SCHWAB] Token refresh failed:", await resp.text());
+        return false;
+      }
+      const tokens = await resp.json() as any;
+      storage.upsertSchwabConfig({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token || config.refreshToken,
+        tokenExpiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
+      });
+      return true;
+    } catch (err: any) {
+      console.error("[SCHWAB] Token refresh error:", err.message);
+      return false;
+    }
+  }
+
+  /** Get a valid Schwab access token, refreshing if expired */
+  async function getSchwabAccessToken(): Promise<string | null> {
+    const config = storage.getSchwabConfig();
+    if (!config?.accessToken) return null;
+    // Check if token is expired (with 60s buffer)
+    if (config.tokenExpiresAt && new Date(config.tokenExpiresAt).getTime() < Date.now() + 60000) {
+      const refreshed = await refreshSchwabToken();
+      if (!refreshed) return null;
+      return storage.getSchwabConfig()?.accessToken || null;
+    }
+    return config.accessToken;
+  }
+
+  /** Schwab accounts — fetch account numbers and hashes */
+  app.get("/api/schwab/accounts", async (_req, res) => {
+    try {
+      const token = await getSchwabAccessToken();
+      if (!token) return res.status(401).json({ error: "Schwab not connected or token expired" });
+      const resp = await fetch("https://api.schwabapi.com/trader/v1/accounts?fields=positions", {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Schwab API error: ${await resp.text()}` });
+      const accounts = await resp.json() as any[];
+      // Store account number from first account
+      if (accounts?.length > 0) {
+        const acct = accounts[0];
+        const acctNum = acct.securitiesAccount?.accountNumber || acct.accountNumber;
+        if (acctNum) {
+          storage.upsertSchwabConfig({ accountNumber: acctNum, lastSyncAt: new Date().toISOString() });
+        }
+      }
+      res.json(accounts);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /** Schwab positions — fetch positions for the connected account */
+  app.get("/api/schwab/positions", async (_req, res) => {
+    try {
+      const token = await getSchwabAccessToken();
+      if (!token) return res.status(401).json({ error: "Schwab not connected or token expired" });
+      const resp = await fetch("https://api.schwabapi.com/trader/v1/accounts?fields=positions", {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Schwab API error: ${await resp.text()}` });
+      const accounts = await resp.json() as any[];
+      const positions: any[] = [];
+      for (const acct of accounts || []) {
+        const acctPositions = acct.securitiesAccount?.positions || [];
+        for (const pos of acctPositions) {
+          positions.push({
+            ticker: pos.instrument?.symbol || "?",
+            description: pos.instrument?.description || "",
+            assetType: pos.instrument?.assetType || "",
+            quantity: pos.longQuantity - (pos.shortQuantity || 0),
+            marketValue: pos.marketValue || 0,
+            averagePrice: pos.averagePrice || 0,
+            currentDayPnl: pos.currentDayProfitLoss || 0,
+            currentDayPnlPct: pos.currentDayProfitLossPercentage || 0,
+          });
+        }
+      }
+      storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
+      res.json(positions);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /** Schwab orders — fetch order history */
+  app.get("/api/schwab/orders", async (req, res) => {
+    try {
+      const token = await getSchwabAccessToken();
+      if (!token) return res.status(401).json({ error: "Schwab not connected or token expired" });
+      // Default to past 60 days of orders
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - 60);
+      const toDate = new Date();
+      const params = new URLSearchParams({
+        fromEnteredTime: fromDate.toISOString(),
+        toEnteredTime: toDate.toISOString(),
+      });
+      const resp = await fetch(`https://api.schwabapi.com/trader/v1/orders?${params}`, {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Schwab API error: ${await resp.text()}` });
+      const orders = await resp.json() as any[];
+      res.json(orders || []);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /** Schwab sync — refresh positions and sync to local DB */
+  app.post("/api/schwab/sync", async (_req, res) => {
+    try {
+      const token = await getSchwabAccessToken();
+      if (!token) return res.status(401).json({ error: "Schwab not connected or token expired" });
+      const resp = await fetch("https://api.schwabapi.com/trader/v1/accounts?fields=positions", {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Schwab API error: ${await resp.text()}` });
+      const accounts = await resp.json() as any[];
+      let syncedCount = 0;
+      for (const acct of accounts || []) {
+        const acctPositions = acct.securitiesAccount?.positions || [];
+        for (const pos of acctPositions) {
+          const ticker = pos.instrument?.symbol;
+          if (!ticker || pos.instrument?.assetType !== "EQUITY") continue;
+          storage.upsertPosition({
+            ticker,
+            quantity: pos.longQuantity - (pos.shortQuantity || 0),
+            avgCostBasis: pos.averagePrice || 0,
+            currentPrice: pos.marketValue ? pos.marketValue / (pos.longQuantity || 1) : 0,
+            marketValue: pos.marketValue || 0,
+            unrealizedPnl: pos.longQuantity * ((pos.marketValue / (pos.longQuantity || 1)) - (pos.averagePrice || 0)),
+            unrealizedPnlPct: pos.averagePrice ? (((pos.marketValue / (pos.longQuantity || 1)) - pos.averagePrice) / pos.averagePrice * 100) : 0,
+            dayChange: pos.currentDayProfitLoss || 0,
+            dayChangePct: pos.currentDayProfitLossPercentage || 0,
+            source: "schwab",
+            lastSyncedAt: new Date().toISOString(),
+          });
+          syncedCount++;
+        }
+      }
+      storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
+      res.json({ success: true, syncedPositions: syncedCount });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   /** Polling status */
   app.get("/api/status", (_req, res) => {
     res.json(getV3PollingStatus());
