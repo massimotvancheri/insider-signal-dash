@@ -419,7 +419,7 @@ export async function registerRoutes(
       return res.status(401).json({ error: "unauthorized" });
     }
     const { exec } = require("child_process");
-    exec('sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db" && gsutil cp /tmp/insider-signal-backup.db gs://insider-signal-deploys/backups/data-$(date +%Y%m%d-%H%M%S).db && rm /tmp/insider-signal-backup.db',
+    exec(`sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db" && TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])") && DEST="backups/data-$(date +%Y%m%d-%H%M%S).db" && curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST" > /dev/null && rm /tmp/insider-signal-backup.db && echo "Backed up to gs://insider-signal-deploys/$DEST"`,
       { timeout: 300000 },
       (error: any, stdout: string, stderr: string) => {
         if (error) console.error("[BACKUP] Failed:", error.message);
