@@ -11,6 +11,10 @@ import {
   getExecutionSummary, getTradeDeviations, getMissedSignals,
   getPortfolioWithSignalHealth, getDataPipelineStatus,
 } from "./v3-strategy";
+import {
+  runFifoMatching, getPerformanceAnalytics, getEquityCurve,
+  runSignalTradeMatching, getEnhancedMissedSignals,
+} from "./trade-engine";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -19,6 +23,21 @@ export async function registerRoutes(
 
   // Start the V3 dual-mode EDGAR polling engine
   startV3Polling();
+
+  // Auto-run trade matching on startup (if trades exist but no closed trades)
+  try {
+    const tradeCount = db.all(sql`SELECT count(*) as c FROM trade_executions`)[0] as any;
+    const closedCount = db.all(sql`SELECT count(*) as c FROM closed_trades`)[0] as any;
+    if (tradeCount?.c > 0 && closedCount?.c === 0) {
+      console.log("[STARTUP] Running signal-trade matching and FIFO matching...");
+      const sigResult = runSignalTradeMatching();
+      console.log(`[STARTUP] Signal matching: ${sigResult.matched} matched, ${sigResult.unmatched} unmatched`);
+      const fifoResult = runFifoMatching();
+      console.log(`[STARTUP] FIFO matching: ${fifoResult.matched} closed trades created`);
+    }
+  } catch (e: any) {
+    console.error("[STARTUP] Trade matching failed:", e.message);
+  }
 
   // ============================================================
   // TAB 1: SIGNALS
@@ -198,8 +217,14 @@ export async function registerRoutes(
   // TAB 4: PERFORMANCE
   // ============================================================
 
-  /** Performance summary — three-way comparison KPIs */
+  /** Performance summary — trade-based analytics with realized/unrealized P&L */
   app.get("/api/performance/summary", (_req, res) => {
+    // Try trade-engine analytics first (based on actual closed trades)
+    const analytics = getPerformanceAnalytics();
+    if (analytics) {
+      return res.json(analytics);
+    }
+    // Fall back to snapshot-based summary
     res.json(getPerformanceSummary());
   });
 
@@ -207,6 +232,11 @@ export async function registerRoutes(
   app.get("/api/performance/chart", (req, res) => {
     const days = parseInt(req.query.days as string) || 90;
     res.json(getPerformanceSnapshots(days));
+  });
+
+  /** Equity curve — cumulative P&L over time from closed trades */
+  app.get("/api/performance/equity-curve", (_req, res) => {
+    res.json(getEquityCurve());
   });
 
   // ============================================================
@@ -224,9 +254,16 @@ export async function registerRoutes(
     res.json(getTradeDeviations(limit));
   });
 
-  /** Missed signals — tier 1-2 signals the user didn't trade */
+  /** Missed signals — high-scoring signals the user didn't trade */
   app.get("/api/execution/missed-signals", (req, res) => {
     const days = parseInt(req.query.days as string) || 90;
+    const minScore = parseInt(req.query.minScore as string) || 70;
+    // Use enhanced version that filters by traded tickers and estimates alpha missed
+    const enhanced = getEnhancedMissedSignals(days, minScore);
+    if (enhanced.length > 0) {
+      return res.json(enhanced);
+    }
+    // Fall back to original query
     res.json(getMissedSignals(days));
   });
 
@@ -782,6 +819,41 @@ export async function registerRoutes(
       }
     );
     res.json({ status: "backfill_started", startYear });
+  });
+
+  // Admin: run FIFO trade matching + signal matching
+  app.post("/api/admin/compute-trades", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    try {
+      // Step 1: Run signal-trade matching (update execution_deviations)
+      const signalResult = runSignalTradeMatching();
+      console.log(`[COMPUTE] Signal matching: ${signalResult.matched} matched, ${signalResult.unmatched} unmatched`);
+
+      // Step 2: Run FIFO closed trade matching
+      const fifoResult = runFifoMatching();
+      console.log(`[COMPUTE] FIFO matching: ${fifoResult.matched} closed trades created`);
+
+      // Step 3: Get performance summary
+      const perf = getPerformanceAnalytics();
+
+      res.json({
+        status: "completed",
+        signalMatching: signalResult,
+        fifoMatching: fifoResult,
+        performance: perf ? {
+          totalRealizedPnl: perf.totalRealizedPnl,
+          winRate: perf.winRate,
+          closedTradeCount: perf.closedTradeCount,
+          profitFactor: perf.profitFactor,
+        } : null,
+      });
+    } catch (err: any) {
+      console.error("[COMPUTE] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Admin: run factor research

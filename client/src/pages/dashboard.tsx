@@ -764,6 +764,15 @@ function PortfolioTab() {
   const winRate = closedTrades && closedTrades.length > 0
     ? closedTrades.filter((t: any) => t.realizedPnl > 0).length / closedTrades.length * 100
     : 0;
+  const totalRealizedPnl = closedTrades ? closedTrades.reduce((s: number, t: any) => s + (t.realizedPnl || 0), 0) : 0;
+  const winners = closedTrades ? closedTrades.filter((t: any) => t.realizedPnl > 0) : [];
+  const losers = closedTrades ? closedTrades.filter((t: any) => t.realizedPnl < 0) : [];
+  const grossProfits = winners.reduce((s: number, t: any) => s + t.realizedPnl, 0);
+  const grossLosses = Math.abs(losers.reduce((s: number, t: any) => s + t.realizedPnl, 0));
+  const profitFactor = grossLosses > 0 ? grossProfits / grossLosses : (grossProfits > 0 ? Infinity : 0);
+  const avgHoldDays = closedTrades && closedTrades.length > 0
+    ? closedTrades.reduce((s: number, t: any) => s + (t.holdingDays || 0), 0) / closedTrades.length
+    : 0;
 
   function healthColor(health: string | undefined): string {
     if (!health) return "";
@@ -782,27 +791,37 @@ function PortfolioTab() {
   return (
     <div className="space-y-3">
       {/* Portfolio KPIs */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-        <KPICard label="Portfolio Value" value={summary.totalValue ? formatCurrency(summary.totalValue) : "—"}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
+        <KPICard label="Portfolio Value" value={summary.totalValue ? formatCurrency(summary.totalValue) : portfolioLoading ? "..." : "—"}
           icon={Briefcase} tooltip="Total Market Value" tooltipFormula="SUM(quantity × current_price)"
           tooltipDesc="Current market value of all open positions." />
-        <KPICard label="Unrealized P&L" value={summary.totalPnl != null ? formatCurrency(summary.totalPnl) : "—"}
+        <KPICard label="Unrealized P&L" value={summary.totalPnl != null ? formatCurrency(summary.totalPnl) : portfolioLoading ? "..." : "—"}
           subtitle={summary.totalPnlPct != null ? formatPct(summary.totalPnlPct) : undefined}
           icon={summary.totalPnl >= 0 ? TrendingUp : TrendingDown} tooltip="Unrealized Profit/Loss"
           tooltipFormula="SUM(market_value - cost_basis)" tooltipDesc="Total unrealized gain/loss across all open positions."
           valueClass={summary.totalPnl >= 0 ? "text-gain" : "text-loss"} />
+        <KPICard label="Realized P&L" value={closedTrades && closedTrades.length > 0 ? formatCurrency(totalRealizedPnl) : "—"}
+          icon={DollarSign} tooltip="Total Realized P&L" tooltipFormula="SUM(closed_trade_pnl)"
+          tooltipDesc="Total profit/loss from all completed round-trip trades."
+          valueClass={totalRealizedPnl >= 0 ? "text-gain" : "text-loss"} />
         <KPICard label="Day Change" value={summary.totalDayChange != null ? formatCurrency(summary.totalDayChange) : "—"}
           subtitle={summary.totalDayChangePct != null ? formatPct(summary.totalDayChangePct) : undefined}
           icon={Activity} tooltip="Today's Change" tooltipDesc="Net change in portfolio value today."
-          valueClass={summary.totalDayChange >= 0 ? "text-gain" : "text-loss"} />
+          valueClass={(summary.totalDayChange || 0) >= 0 ? "text-gain" : "text-loss"} />
+        <KPICard label="Win Rate" value={closedTrades && closedTrades.length > 0 ? formatPct(winRate, 0) : "—"}
+          subtitle={closedTrades && closedTrades.length > 0 ? `${winners.length}W/${losers.length}L` : undefined}
+          icon={Award} tooltip="Win Rate" tooltipFormula="winning_trades / total_trades × 100"
+          tooltipDesc="Percentage of closed trades that were profitable."
+          valueClass={winRate >= 50 ? "text-gain" : "text-loss"} />
+        <KPICard label="Profit Factor" value={closedTrades && closedTrades.length > 0 ? (profitFactor === Infinity ? "∞" : formatRatio(profitFactor)) : "—"}
+          icon={Scale} tooltip="Profit Factor" tooltipFormula="gross_profits / gross_losses"
+          tooltipDesc="Ratio of total gains to total losses. Above 1.5 is good, above 2.0 is excellent."
+          valueClass={profitFactor >= 1.5 ? "text-gain" : profitFactor >= 1.0 ? "text-foreground" : "text-loss"} />
+        <KPICard label="Avg Hold" value={closedTrades && closedTrades.length > 0 ? `${avgHoldDays.toFixed(0)}d` : "—"}
+          icon={Timer} tooltip="Average Holding Period" tooltipFormula="AVG(exit_date - entry_date)"
+          tooltipDesc="Average calendar days positions are held." />
         <KPICard label="Positions" value={summary.positionCount?.toString() || positions.length.toString() || "0"} icon={BarChart3}
           tooltip="Open Positions" tooltipDesc="Number of distinct tickers currently held." />
-        <KPICard label="Signal-Aligned" value={`${signalAlignedPct.toFixed(0)}%`} icon={Target}
-          tooltip="Signal-Aligned %" tooltipFormula="aligned_positions / total_positions × 100"
-          tooltipDesc="Percentage of current positions that were entered based on an insider signal vs independent trades." />
-        <KPICard label="Win Rate" value={closedTrades && closedTrades.length > 0 ? formatPct(winRate, 0) : "—"}
-          icon={Award} tooltip="Win Rate" tooltipFormula="winning_trades / total_trades × 100"
-          tooltipDesc="Percentage of closed trades that were profitable." />
       </div>
 
       {/* Positions Table */}
@@ -861,7 +880,9 @@ function PortfolioTab() {
                 );
               })}
               {positions.length === 0 && (
-                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">{portfolioLoading ? "Loading positions..." : "No open positions — connect Schwab to start tracking"}</td></tr>
+                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">
+                  {portfolioLoading ? <span className="flex items-center justify-center gap-2"><Activity className="w-4 h-4 animate-pulse" /> Loading positions...</span> : "No open positions — connect Schwab to start tracking"}
+                </td></tr>
               )}
             </tbody>
           </table>
@@ -949,7 +970,9 @@ function PortfolioTab() {
                 </tr>
               ))}
               {(!closedTrades || closedTrades.length === 0) && (
-                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">No closed trades yet</td></tr>
+                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">
+                  {!closedTrades ? <span className="flex items-center justify-center gap-2"><Activity className="w-4 h-4 animate-pulse" /> Loading closed trades...</span> : "No closed trades yet — run trade matching to compute P&L"}
+                </td></tr>
               )}
             </tbody>
           </table>
@@ -1012,22 +1035,26 @@ function PortfolioTab() {
 // TAB 4: PERFORMANCE
 // ====================================================================
 function PerformanceTab() {
-  const { data: summary } = useQuery<any>({
+  const { data: summary, isLoading: summaryLoading } = useQuery<any>({
     queryKey: ["/api/performance/summary"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/performance/summary");
       return res.json();
     },
     refetchInterval: 60000,
+    staleTime: 60000,
+    retry: 3,
   });
 
-  const { data: chartData } = useQuery<any[]>({
-    queryKey: ["/api/performance/chart"],
+  const { data: equityCurve, isLoading: curveLoading } = useQuery<any[]>({
+    queryKey: ["/api/performance/equity-curve"],
     queryFn: async () => {
-      const res = await apiRequest("GET", "/api/performance/chart?days=90");
+      const res = await apiRequest("GET", "/api/performance/equity-curve");
       return res.json();
     },
     refetchInterval: 60000,
+    staleTime: 60000,
+    retry: 3,
   });
 
   const { data: schwabPositions } = useQuery<any[]>({
@@ -1050,82 +1077,97 @@ function PerformanceTab() {
 
   return (
     <div className="space-y-3">
-      {/* KPI Row — Three-way comparison */}
+      {/* KPI Row — Trade-based analytics */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
-        <KPICard label="Strategy Return" value={m.strategyReturn != null ? formatPct(m.strategyReturn * 100) : "—"}
-          icon={TrendingUp} tooltip="Strategy Return" tooltipFormula="(NAV_current - NAV_initial) / NAV_initial × 100"
-          tooltipDesc="Cumulative return if every signal was traded optimally according to the model."
-          valueClass={m.strategyReturn >= 0 ? "text-gain" : "text-loss"} />
-        <KPICard label="Your Return" value={m.yourReturn != null ? formatPct(m.yourReturn * 100) : "—"}
-          icon={Briefcase} tooltip="Your Actual Return" tooltipFormula="(your_NAV_current - your_NAV_initial) / your_NAV_initial × 100"
-          tooltipDesc="Your actual cumulative return from Schwab-synced trades."
-          valueClass={m.yourReturn >= 0 ? "text-gain" : "text-loss"} />
-        <KPICard label="Benchmark" value={m.benchmarkReturn != null ? formatPct(m.benchmarkReturn * 100) : "—"}
-          icon={BarChart3} tooltip="SPY Benchmark Return" tooltipDesc="S&P 500 (SPY) total return over the same period for comparison." />
-        <KPICard label="Your Sharpe" value={m.yourSharpe != null ? formatRatio(m.yourSharpe) : "—"}
-          subtitle={m.yourSharpe >= 1.5 ? "Excellent" : m.yourSharpe >= 1.0 ? "Good" : m.yourSharpe != null ? "Below target" : undefined}
-          icon={Shield} tooltip="Your Sharpe Ratio" tooltipFormula="(E[R] - Rf) / σ(R) × √252"
-          tooltipDesc="Your risk-adjusted return. Above 1.0 is good, above 1.5 is excellent." />
-        <KPICard label="Strategy Sharpe" value={m.strategySharpe != null ? formatRatio(m.strategySharpe) : "—"}
-          icon={Shield} tooltip="Strategy Sharpe Ratio" tooltipFormula="(E[R_strat] - Rf) / σ(R_strat) × √252"
-          tooltipDesc="The model strategy's risk-adjusted return for comparison against yours." />
-        <KPICard label="Alpha vs Bench" value={m.alphaVsBenchmark != null ? formatPct(m.alphaVsBenchmark * 100) : "—"}
-          icon={Award} tooltip="Alpha vs Benchmark" tooltipFormula="your_return - SPY_return"
-          tooltipDesc="Your excess return above the S&P 500. Positive = outperforming the market."
-          valueClass={m.alphaVsBenchmark >= 0 ? "text-gain" : "text-loss"} />
-        <KPICard label="Deviation Cost" value={m.deviationCost != null ? formatPct(m.deviationCost * 100) : "—"}
-          icon={AlertTriangle} tooltip="Deviation Cost" tooltipFormula="strategy_return - your_return"
-          tooltipDesc="Return lost by deviating from the model's recommendations. Includes missed signals, late entries, wrong sizing, and early/late exits."
-          valueClass={m.deviationCost > 0 ? "text-loss" : "text-gain"} />
+        <KPICard label="Realized P&L" value={m.totalRealizedPnl != null ? formatCurrency(m.totalRealizedPnl) : summaryLoading ? "..." : "—"}
+          icon={DollarSign} tooltip="Total Realized P&L" tooltipFormula="SUM(closed_trade_pnl)"
+          tooltipDesc="Total profit/loss from all closed round-trip trades."
+          valueClass={m.totalRealizedPnl >= 0 ? "text-gain" : "text-loss"} />
+        <KPICard label="Unrealized P&L" value={m.totalUnrealizedPnl != null ? formatCurrency(m.totalUnrealizedPnl) : summaryLoading ? "..." : "—"}
+          icon={TrendingUp} tooltip="Total Unrealized P&L" tooltipFormula="SUM(position_pnl)"
+          tooltipDesc="Total unrealized gain/loss on open positions."
+          valueClass={(m.totalUnrealizedPnl || 0) >= 0 ? "text-gain" : "text-loss"} />
+        <KPICard label="Combined P&L" value={m.combinedPnl != null ? formatCurrency(m.combinedPnl) : summaryLoading ? "..." : "—"}
+          icon={Briefcase} tooltip="Combined P&L" tooltipFormula="realized + unrealized"
+          tooltipDesc="Total realized + unrealized P&L across all trades."
+          valueClass={(m.combinedPnl || 0) >= 0 ? "text-gain" : "text-loss"} />
+        <KPICard label="Win Rate" value={m.winRate != null ? formatPct(m.winRate, 0) : summaryLoading ? "..." : "—"}
+          subtitle={m.winCount != null ? `${m.winCount}W / ${m.lossCount}L` : undefined}
+          icon={Award} tooltip="Win Rate" tooltipFormula="winning_trades / total_closed × 100"
+          tooltipDesc="Percentage of closed trades that were profitable."
+          valueClass={m.winRate >= 50 ? "text-gain" : "text-loss"} />
+        <KPICard label="Profit Factor" value={m.profitFactor != null ? (m.profitFactor === Infinity ? "∞" : formatRatio(m.profitFactor)) : summaryLoading ? "..." : "—"}
+          icon={Scale} tooltip="Profit Factor" tooltipFormula="gross_profits / gross_losses"
+          tooltipDesc="Ratio of total gains to total losses. Above 1.5 is good, above 2.0 is excellent."
+          valueClass={m.profitFactor >= 1.5 ? "text-gain" : m.profitFactor >= 1.0 ? "text-foreground" : "text-loss"} />
+        <KPICard label="Avg Hold" value={m.avgHoldingPeriod != null ? `${m.avgHoldingPeriod.toFixed(0)}d` : summaryLoading ? "..." : "—"}
+          icon={Timer} tooltip="Average Holding Period" tooltipFormula="AVG(exit_date - entry_date)"
+          tooltipDesc="Average number of calendar days positions are held before closing." />
+        <KPICard label="Closed Trades" value={m.closedTradeCount != null ? m.closedTradeCount.toString() : summaryLoading ? "..." : "—"}
+          subtitle={m.openPositionCount != null ? `${m.openPositionCount} open` : undefined}
+          icon={BarChart3} tooltip="Trade Count" tooltipDesc="Total number of completed round-trip trades." />
       </div>
 
-      {/* Equity Curve — 3 lines */}
+      {/* Trade Statistics */}
       <div className="bg-card border border-border rounded-md p-3">
-        <MetricTooltip title="Equity Curves" description="Three-way comparison: amber = model strategy, white = your actual returns, gray dashed = SPY benchmark. Gap between strategy and yours = deviation cost.">
-          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3 cursor-help">Strategy vs You vs Benchmark — Cumulative Returns (90D)</h3>
-        </MetricTooltip>
-        <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartData || []}>
-              <defs>
-                <linearGradient id="stratGradV3" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="hsl(37, 90%, 55%)" stopOpacity={0.2} />
-                  <stop offset="95%" stopColor="hsl(37, 90%, 55%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 10%, 14%)" />
-              <XAxis dataKey="date" tick={{ fontSize: 9, fill: "hsl(210, 6%, 50%)" }}
-                tickFormatter={(v) => v ? v.slice(5) : ""} stroke="hsl(220, 10%, 14%)" />
-              <YAxis tick={{ fontSize: 9, fill: "hsl(210, 6%, 50%)" }}
-                tickFormatter={(v) => `${v}%`} stroke="hsl(220, 10%, 14%)" width={45} />
-              <RechartsTooltip content={<PerfTooltipContent />} />
-              <ReferenceLine y={0} stroke="hsl(210, 6%, 30%)" strokeDasharray="3 3" />
-              <Area type="monotone" dataKey="strategy" stroke="hsl(37, 90%, 55%)" fill="url(#stratGradV3)" strokeWidth={2} name="Strategy" />
-              <Line type="monotone" dataKey="you" stroke="hsl(0, 0%, 90%)" strokeWidth={1.5} dot={false} name="You" />
-              <Line type="monotone" dataKey="your" stroke="hsl(0, 0%, 90%)" strokeWidth={1.5} dot={false} name="You" />
-              <Line type="monotone" dataKey="benchmark" stroke="hsl(210, 6%, 50%)" strokeWidth={1} dot={false} strokeDasharray="4 4" name="SPY" />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Risk Metrics Panel */}
-      <div className="bg-card border border-border rounded-md p-3">
-        <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Risk Metrics</h3>
+        <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Trade Statistics</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {[
-            { label: "Sortino Ratio", value: m.sortinoRatio != null ? formatRatio(m.sortinoRatio) : "—", desc: "Downside-risk-adjusted return", formula: "(E[R] - Rf) / σ_down(R) × √252" },
-            { label: "Max Drawdown", value: m.maxDrawdown != null ? formatPct(-Math.abs(m.maxDrawdown) * 100) : "—", desc: "Largest peak-to-trough decline", formula: "(Peak - Trough) / Peak × 100", color: "text-loss" },
-            { label: "Current DD", value: m.currentDrawdown != null ? formatPct(-Math.abs(m.currentDrawdown) * 100) : "—", desc: "Current drawdown from peak", color: m.currentDrawdown > 0 ? "text-loss" : "" },
-            { label: "Win Rate", value: m.winRate != null ? formatPct(m.winRate * 100, 0) : "—", desc: "Percentage of profitable trades", formula: "winners / total × 100" },
+            { label: "Avg Win", value: m.avgWinDollar != null ? formatCurrency(m.avgWinDollar) : "—", sub: m.avgWinPct != null ? formatPct(m.avgWinPct) : undefined, desc: "Average profit on winning trades", color: "text-gain" },
+            { label: "Avg Loss", value: m.avgLossDollar != null ? formatCurrency(-m.avgLossDollar) : "—", sub: m.avgLossPct != null ? formatPct(m.avgLossPct) : undefined, desc: "Average loss on losing trades", color: "text-loss" },
+            { label: "Best Trade", value: m.bestTrade ? `${m.bestTrade.ticker} ${formatCurrency(m.bestTrade.pnl)}` : "—", sub: m.bestTrade ? formatPct(m.bestTrade.pnlPct) : undefined, desc: "Largest single winning trade", color: "text-gain" },
+            { label: "Worst Trade", value: m.worstTrade ? `${m.worstTrade.ticker} ${formatCurrency(m.worstTrade.pnl)}` : "—", sub: m.worstTrade ? formatPct(m.worstTrade.pnlPct) : undefined, desc: "Largest single losing trade", color: "text-loss" },
+            { label: "Gross Profits", value: m.grossProfits != null ? formatCurrency(m.grossProfits) : "—", desc: "Sum of all winning trade P&L", color: "text-gain" },
+            { label: "Gross Losses", value: m.grossLosses != null ? formatCurrency(-m.grossLosses) : "—", desc: "Sum of all losing trade P&L", color: "text-loss" },
+            { label: "Expectancy", value: m.expectancy != null ? formatCurrency(m.expectancy) : "—", desc: "Expected dollar value per trade: (winRate × avgWin) - (lossRate × avgLoss)", formula: "E = P(win)×W - P(loss)×L", color: m.expectancy >= 0 ? "text-gain" : "text-loss" },
+            { label: "Market Value", value: m.totalMarketValue != null ? formatCurrency(m.totalMarketValue) : "—", desc: "Current total market value of open positions", color: "text-foreground" },
           ].map((row, i) => (
-            <MetricTooltip key={i} title={row.label} description={row.desc} formula={row.formula}>
+            <MetricTooltip key={i} title={row.label} description={row.desc} formula={(row as any).formula}>
               <div className="bg-background rounded border border-border/50 p-2.5 cursor-help">
                 <div className="text-[10px] text-muted-foreground uppercase tracking-wider">{row.label}</div>
-                <div className={`text-base font-bold mt-1 ${row.color || "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>{row.value}</div>
+                <div className={`text-sm font-bold mt-1 ${row.color || "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>{row.value}</div>
+                {row.sub && <div className={`text-[10px] mt-0.5 ${row.color || "text-muted-foreground"}`}>{row.sub}</div>}
               </div>
             </MetricTooltip>
           ))}
+        </div>
+      </div>
+
+      {/* Equity Curve */}
+      <div className="bg-card border border-border rounded-md p-3">
+        <MetricTooltip title="Equity Curve" description="Cumulative realized P&L over time from closed trades. Each point represents cumulative profit after a trade exit.">
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3 cursor-help">Equity Curve — Cumulative P&L</h3>
+        </MetricTooltip>
+        <div className="h-56">
+          {equityCurve && equityCurve.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={equityCurve}>
+                <defs>
+                  <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="hsl(37, 90%, 55%)" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="hsl(37, 90%, 55%)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 10%, 14%)" />
+                <XAxis dataKey="date" tick={{ fontSize: 9, fill: "hsl(210, 6%, 50%)" }}
+                  tickFormatter={(v) => v ? v.slice(5) : ""} stroke="hsl(220, 10%, 14%)" />
+                <YAxis tick={{ fontSize: 9, fill: "hsl(210, 6%, 50%)" }}
+                  tickFormatter={(v) => `$${(v/1000).toFixed(0)}K`} stroke="hsl(220, 10%, 14%)" width={55} />
+                <RechartsTooltip
+                  contentStyle={{ background: "hsl(220, 14%, 10%)", border: "1px solid hsl(220, 10%, 20%)", borderRadius: 6, fontSize: 11 }}
+                  formatter={(value: any) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "Cumulative P&L"]}
+                  labelFormatter={(label) => `Exit: ${label}`} />
+                <ReferenceLine y={0} stroke="hsl(210, 6%, 30%)" strokeDasharray="3 3" />
+                <Area type="monotone" dataKey="cumulativePnl" stroke="hsl(37, 90%, 55%)" fill="url(#pnlGrad)" strokeWidth={2} name="Cumulative P&L" />
+              </ComposedChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-[11px]">
+              {curveLoading ? (
+                <div className="flex items-center gap-2"><Activity className="w-4 h-4 animate-pulse" /> Loading equity curve...</div>
+              ) : "No closed trades yet — equity curve will appear after trade matching"}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1221,11 +1263,11 @@ function ExecutionTab() {
     <div className="space-y-3">
       {/* KPI Row — 6 cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-        <KPICard label="Signal Coverage" value={s.signalCoverageCount || `${s.signalCoverage || 0}%`}
+        <KPICard label="Signal Coverage" value={s.signalCoverageCount || (execLoading ? "..." : `${((s.signalCoverage || 0) * 100).toFixed(0)}%`)}
           subtitle={s.signalCoverage != null ? `${(s.signalCoverage * 100).toFixed(0)}% (target 80%+)` : undefined}
           icon={Target} tooltip="Signal Coverage" tooltipFormula="signals_traded / total_tier1_tier2 × 100"
           tooltipDesc="Percentage of Tier 1 and Tier 2 signals that you actually traded. Target is 80%+ for full strategy capture." />
-        <KPICard label="Avg Entry Delay" value={s.avgEntryDelay != null ? `${Number(s.avgEntryDelay).toFixed(1)}d` : "—"}
+        <KPICard label="Avg Entry Delay" value={s.avgEntryDelay != null ? `${Number(s.avgEntryDelay).toFixed(1)}d` : execLoading ? "..." : "—"}
           subtitle={s.avgEntryDelay != null && s.avgEntryDelay > 0 ? (s.avgEntryDelay < 1 ? "Good (<1d)" : "Late (>1d)") : undefined}
           icon={Clock} tooltip="Average Entry Delay" tooltipFormula="AVG(entry_date - signal_date)"
           tooltipDesc="Average trading days between signal generation and your actual entry. Target is <1 day — alpha decays rapidly after signal."
@@ -1269,10 +1311,10 @@ function ExecutionTab() {
               <tbody>
                 {missedSignals.map((sig: any, i: number) => {
                   const ticker = sig.ticker || sig.issuer_ticker || sig.issuerTicker || "";
-                  const score = sig.score || sig.signal_score || sig.signalScore || sig.compositeScore || 0;
-                  const date = sig.date || sig.signal_date || sig.signalDate || "";
-                  const ret63 = sig.return_63d_pct ?? sig.return63d ?? sig.fwdReturn63d ?? null;
-                  const excess63 = sig.excess_63d_pct ?? sig.excessReturn63d ?? sig.excess63d ?? null;
+                  const score = sig.signalScore || sig.score || sig.signal_score || sig.compositeScore || 0;
+                  const date = sig.signalDate || sig.date || sig.signal_date || "";
+                  const ret63 = sig.return63dPct ?? sig.return_63d_pct ?? sig.return63d ?? sig.fwdReturn63d ?? null;
+                  const excess63 = sig.excess63dPct ?? sig.excess_63d_pct ?? sig.excessReturn63d ?? sig.excess63d ?? sig.estimatedAlphaMissed ?? null;
                   return (
                     <tr key={i} className="terminal-row border-b border-border/30">
                       <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
@@ -1292,7 +1334,7 @@ function ExecutionTab() {
               </tbody>
             </table>
           ) : (
-            <EmptyState message={missedLoading ? "Loading missed signals..." : "No missed signals data yet"} icon={EyeOff} />
+            <EmptyState message={missedLoading ? "Loading missed signals..." : "No missed signals found — either all high-score signals were traded, or no signals have score >= 70 in the last 90 days"} icon={EyeOff} />
           )}
         </div>
       </div>
@@ -1332,11 +1374,16 @@ function ExecutionTab() {
                   const trade = item.trade || item;
                   const ticker = trade.ticker || dev.ticker || "";
                   const score = dev.signalScore || trade.signalScore || dev.score || 0;
+                  const classification = dev.classification || "independent";
                   return (
                   <tr key={i} className="terminal-row border-b border-border/30">
                     <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
                     <td className="py-1 px-2 text-center">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(score)}`}>{score}</span>
+                      {classification === "signal_aligned" ? (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(score)}`}>{score || "ALN"}</span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-gray-500/15 text-gray-400 border border-gray-500/30">IND</span>
+                      )}
                     </td>
                     <td className={`py-1 px-2 text-right ${(dev.entryDelayDays || dev.entryDelay || 0) > 1 ? "text-loss" : "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
                       {dev.entryDelayDays != null ? `${dev.entryDelayDays}d` : dev.entryDelay != null ? `${dev.entryDelay}d` : "—"}
@@ -1359,7 +1406,7 @@ function ExecutionTab() {
               </tbody>
             </table>
           ) : (
-            <EmptyState message={deviationsLoading ? "Loading trade deviations..." : "No deviation data yet"} icon={GitCompareArrows} />
+            <EmptyState message={deviationsLoading ? "Loading trade deviations..." : "No deviation data yet — run signal-trade matching first"} icon={GitCompareArrows} />
           )}
         </div>
       </div>
