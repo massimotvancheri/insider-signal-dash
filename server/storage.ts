@@ -177,7 +177,7 @@ export class DatabaseStorage implements IStorage {
     const cutoffStr = cutoff.toISOString().split("T")[0];
     return db.select({
       date: insiderTransactions.filingDate,
-      volume: sql<number>`COALESCE(SUM(${insiderTransactions.totalValue}), 0)`,
+      volume: sql<number>`COALESCE(SUM(CASE WHEN ${insiderTransactions.totalValue} <= 500000000 THEN ${insiderTransactions.totalValue} ELSE 0 END), 0)`,
       count: count(),
     }).from(insiderTransactions)
       .where(and(
