@@ -1222,7 +1222,7 @@ function ExecutionTab() {
   const { data: missedSignals, isLoading: missedLoading } = useQuery<any[]>({
     queryKey: ["/api/execution/missed-signals"],
     queryFn: async () => {
-      const res = await apiRequest("GET", "/api/execution/missed-signals?days=90");
+      const res = await apiRequest("GET", "/api/execution/missed-signals?days=365&minScore=70");
       return res.json();
     },
     refetchInterval: 120000,
@@ -1290,7 +1290,7 @@ function ExecutionTab() {
       {/* Missed Signals Panel */}
       <div className="bg-card border border-border rounded-md p-3">
         <MetricTooltip title="Missed Signals" description="Tier 1 and Tier 2 signals that you did NOT trade. Shows what you left on the table. Focus on reducing misses for high-score signals.">
-          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Missed Signals — What You Left on the Table (90D)</h3>
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Missed Signals — What You Left on the Table (1Y)</h3>
         </MetricTooltip>
         <div className="overflow-auto max-h-48" style={{ overscrollBehavior: "contain" }}>
           {missedSignals && missedSignals.length > 0 ? (
