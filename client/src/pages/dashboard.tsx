@@ -441,6 +441,8 @@ function FactorResearchTab() {
       return res.json();
     },
     refetchInterval: 120000,
+    staleTime: 120000,
+    retry: 2,
   });
   // Ensure alphaDecay is always an array (API may return array directly or wrapped)
   const alphaDecay: any[] = Array.isArray(alphaDecayRaw) ? alphaDecayRaw : [];
@@ -703,7 +705,13 @@ function FactorResearchTab() {
 function PortfolioTab() {
   const { data: portfolioData } = useQuery<any>({
     queryKey: ["/api/portfolio/positions"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/portfolio/positions");
+      return res.json();
+    },
     refetchInterval: 30000,
+    staleTime: 30000,
+    retry: 2,
   });
 
   const { data: schwabPositions } = useQuery<any[]>({
@@ -1155,6 +1163,8 @@ function ExecutionTab() {
       return res.json();
     },
     refetchInterval: 60000,
+    staleTime: 60000,
+    retry: 2,
   });
 
   const { data: missedSignals } = useQuery<any[]>({
@@ -1164,6 +1174,8 @@ function ExecutionTab() {
       return res.json();
     },
     refetchInterval: 120000,
+    staleTime: 120000,
+    retry: 2,
   });
 
   const { data: deviations } = useQuery<any[]>({
@@ -1173,6 +1185,8 @@ function ExecutionTab() {
       return res.json();
     },
     refetchInterval: 120000,
+    staleTime: 120000,
+    retry: 2,
   });
 
   const { data: schwabOrders } = useQuery<any[]>({
