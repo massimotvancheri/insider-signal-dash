@@ -528,7 +528,7 @@ export async function registerRoutes(
       return res.status(401).json({ error: "unauthorized" });
     }
     const { exec } = require("child_process");
-    exec("python3 scripts/enrich-prices.py 5000 2020", { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+    exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2020", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
       (error: any, stdout: string, stderr: string) => {
         if (error) console.error("[ENRICH] Failed:", error.message);
         if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
@@ -546,7 +546,7 @@ export async function registerRoutes(
     }
     const startYear = req.body?.startYear || 2026;
     const { exec } = require("child_process");
-    exec(`npx tsx server/sec-backfill.ts ${startYear}`, { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+    exec(`nice -n 10 npx tsx server/sec-backfill.ts ${startYear}`, { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=512' } },
       (error: any, stdout: string, stderr: string) => {
         if (error) console.error("[BACKFILL] Failed:", error.message);
         if (stdout) console.log("[BACKFILL] stdout:", stdout.slice(-500));
@@ -563,7 +563,7 @@ export async function registerRoutes(
       return res.status(401).json({ error: "unauthorized" });
     }
     const { exec } = require("child_process");
-    exec("python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000 },
+    exec("nice -n 10 python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
       (error: any, stdout: string, stderr: string) => {
         if (error) console.error("[FACTOR-RESEARCH] Failed:", error.message);
         if (stdout) console.log("[FACTOR-RESEARCH] stdout:", stdout.slice(-500));
@@ -718,6 +718,25 @@ chmod +x /opt/deploy.sh`,
     } catch (err: any) {
       res.json({ error: err.message });
     }
+  });
+
+  // Self-healing watchdog: if event loop is blocked >30s, kill stale child processes
+  let lastHeartbeat = Date.now();
+  setInterval(() => { lastHeartbeat = Date.now(); }, 5000);
+  setInterval(() => {
+    const lag = Date.now() - lastHeartbeat;
+    if (lag > 30000) {
+      console.error(`[WATCHDOG] Event loop blocked for ${lag}ms, killing child processes`);
+      const { execSync } = require("child_process");
+      try { execSync("pkill -f 'enrich-prices.py' || true"); } catch {}
+      try { execSync("pkill -f 'sec-backfill.ts' || true"); } catch {}
+      try { execSync("pkill -f 'factor-research.py' || true"); } catch {}
+    }
+  }, 10000);
+
+  // Health check endpoint for external monitoring (no auth required)
+  app.get("/api/ping", (_req, res) => {
+    res.json({ ok: true, uptime: process.uptime(), lag: Date.now() - lastHeartbeat });
   });
 
   return httpServer;
