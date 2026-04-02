@@ -410,12 +410,25 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
       }
     }
 
+    // P&L-based health status (overrides signal-based for underperformers)
+    const pnlPct = pos.unrealizedPnlPct || 0;
+    let healthStatus = signalHealth;
+    if (pnlPct <= -30) {
+      healthStatus = "at_risk";
+    } else if (pnlPct <= -15) {
+      healthStatus = "underperforming";
+    } else if (pnlPct < 0) {
+      healthStatus = "monitor";
+    } else if (signalHealth === "independent" || signalHealth === "on_track") {
+      healthStatus = "on_track";
+    }
+
     return {
       ...pos,
       signalClassification,
       signalId,
       signalScoreAtEntry,
-      signalHealth,
+      signalHealth: healthStatus,
       daysRemaining,
       shouldExit,
     };

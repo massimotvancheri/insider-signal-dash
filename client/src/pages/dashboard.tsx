@@ -457,15 +457,15 @@ function FactorResearchTab() {
         clearTimeout(timeout);
       }
     },
-    refetchInterval: 120000,
-    staleTime: 120000,
+    refetchInterval: 300000,
+    staleTime: 300000,
     retry: 3,
-    retryDelay: 3000,
+    retryDelay: 5000,
   });
   // Ensure alphaDecay is always an array (API may return array directly or wrapped)
   const alphaDecay: any[] = Array.isArray(alphaDecayRaw) ? alphaDecayRaw : [];
 
-  const { data: modelWeightsRaw } = useQuery<any>({
+  const { data: modelWeightsRaw, isLoading: modelWeightsLoading } = useQuery<any[]>({
     queryKey: ["/api/factors/model-weights"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/factors/model-weights");
@@ -682,7 +682,7 @@ function FactorResearchTab() {
         <MetricTooltip title="Model Weights" description="Current effective weight per factor in the composite scoring model. Weights are derived empirically from forward-return data, not from academic assumptions. Higher weight = stronger predictive signal historically.">
           <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Model Weights — Current Factor Allocation</h3>
         </MetricTooltip>
-        {modelWeights && modelWeights.length > 0 ? (
+        {modelWeights.length > 0 ? (
           <div style={{ height: Math.max(200, modelWeights.length * 28 + 40) }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={modelWeights} layout="vertical" margin={{ left: 120, right: 30, top: 5, bottom: 5 }}>
@@ -714,7 +714,7 @@ function FactorResearchTab() {
             </ResponsiveContainer>
           </div>
         ) : (
-          <EmptyState message="Model weights not yet computed — run factor analysis pipeline" icon={Scale} />
+          <EmptyState message={modelWeightsLoading ? "Loading model weights..." : "Model weights not yet computed — run factor analysis pipeline"} icon={Scale} />
         )}
       </div>
     </div>
@@ -789,12 +789,24 @@ function PortfolioTab() {
     ? closedTrades.reduce((s: number, t: any) => s + (t.holdingDays || 0), 0) / closedTrades.length
     : 0;
 
-  function getPositionHealth(pos: any): { color: string; label: string } {
-    const pnlPct = pos.unrealizedPnlPct || 0;
-    if (pnlPct < -30) return { color: "text-red-400", label: "AT RISK" };
-    if (pnlPct < -15) return { color: "text-orange-400", label: "UNDERPERFORMING" };
-    if (pnlPct < 0) return { color: "text-amber-400", label: "MONITOR" };
-    return { color: "text-green-400", label: "ON TRACK" };
+  function healthColor(health: string | undefined): string {
+    if (!health) return "";
+    if (health === "at_risk") return "text-red-400";
+    if (health === "underperforming") return "text-orange-400";
+    if (health === "monitor") return "text-yellow-400";
+    if (health === "past_optimal_hold") return "text-loss";
+    if (health === "approaching_exit") return "text-amber-400";
+    return "text-green-400";
+  }
+
+  function healthLabel(health: string | undefined): string {
+    if (!health) return "";
+    if (health === "at_risk") return "AT RISK";
+    if (health === "underperforming") return "UNDERPERFORM";
+    if (health === "monitor") return "MONITOR";
+    if (health === "past_optimal_hold") return "PAST OPT";
+    if (health === "approaching_exit") return "APPROACH EXIT";
+    return "ON TRACK";
   }
 
   return (
@@ -881,10 +893,7 @@ function PortfolioTab() {
                       </span>
                     </td>
                     <td className="py-1.5 px-2 text-center">
-                      {(() => {
-                        const health = getPositionHealth(pos);
-                        return <span className={`text-[9px] font-bold ${health.color}`}>{health.label}</span>;
-                      })()}
+                      <span className={`text-[9px] font-bold ${healthColor(pos.signalHealth)}`}>{healthLabel(pos.signalHealth)}</span>
                     </td>
                   </tr>
                 );
@@ -1855,7 +1864,7 @@ function SettingsTab() {
           <p>The V3 composite score is derived from <span className="text-foreground font-bold">11 empirical factors</span>, each weighted by its actual predictive power for forward returns. Unlike V2's equal-weighted 4-factor model, V3 weights are <span className="text-primary">derived from data</span>, not academic assumptions.</p>
 
           {/* Current Model Weights Table */}
-          {modelWeights && modelWeights.length > 0 ? (
+          {modelWeights.length > 0 ? (
             <div className="overflow-auto">
               <table className="w-full text-[11px]">
                 <thead>
