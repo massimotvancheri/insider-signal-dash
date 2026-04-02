@@ -138,8 +138,9 @@ export class DatabaseStorage implements IStorage {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
+    // Cap individual transaction values at $500M to filter SEC data outliers
     const result = db.select({
-      total: sql<number>`COALESCE(SUM(${insiderTransactions.totalValue}), 0)`
+      total: sql<number>`COALESCE(SUM(CASE WHEN ${insiderTransactions.totalValue} <= 500000000 THEN ${insiderTransactions.totalValue} ELSE 0 END), 0)`
     }).from(insiderTransactions)
       .where(and(
         eq(insiderTransactions.transactionType, "P"),
