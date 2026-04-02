@@ -245,17 +245,13 @@ export function getExecutionSummary() {
   const signalAligned = deviations.filter(d => d.classification === "signal_aligned");
   const independent = deviations.filter(d => d.classification === "independent");
   
-  // Signal coverage: how many tier 1-2 signals did the user trade?
-  const tier12Signals = db.select({ count: sql<number>`count(*)` })
-    .from(purchaseSignals)
-    .where(sql`score_tier <= 2 AND signal_date >= date('now', '-90 days')`)
-    .get();
-  
+  // Signal coverage: how many of user's trades were signal-aligned?
+  const totalTradeCount = deviations.length;
   const tradedSignals = signalAligned.length;
-  
+
   return {
-    signalCoverage: tier12Signals?.count ? tradedSignals / tier12Signals.count : 0,
-    signalCoverageCount: `${tradedSignals}/${tier12Signals?.count || 0}`,
+    signalCoverage: totalTradeCount > 0 ? tradedSignals / totalTradeCount : 0,
+    signalCoverageCount: `${tradedSignals}/${totalTradeCount}`,
     avgEntryDelay: signalAligned.length > 0 
       ? signalAligned.reduce((s, d) => s + (d.entryDelayDays || 0), 0) / signalAligned.length 
       : 0,

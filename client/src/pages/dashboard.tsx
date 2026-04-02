@@ -46,10 +46,13 @@ function MetricTooltip({ children, title, formula, description }: {
 }
 
 function formatCurrency(val: number): string {
-  if (val >= 1_000_000_000) return `$${(val / 1_000_000_000).toFixed(1)}B`;
-  if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(1)}M`;
-  if (val >= 1_000) return `$${(val / 1_000).toFixed(0)}K`;
-  return `$${val.toFixed(0)}`;
+  const abs = Math.abs(val);
+  const sign = val < 0 ? "-" : "";
+  if (abs >= 1_000_000_000_000) return `${sign}$${(abs / 1_000_000_000_000).toFixed(1)}T`;
+  if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(1)}B`;
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(0)}K`;
+  return `${sign}$${abs.toFixed(0)}`;
 }
 
 function formatNumber(val: number): string {
@@ -444,8 +447,15 @@ function FactorResearchTab() {
   const { data: alphaDecayRaw, isLoading: alphaDecayLoading } = useQuery<any>({
     queryKey: ["/api/factors/alpha-decay"],
     queryFn: async () => {
-      const res = await apiRequest("GET", "/api/factors/alpha-decay");
-      return res.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);
+      try {
+        const res = await fetch("/api/factors/alpha-decay", { signal: controller.signal });
+        if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+        return res.json();
+      } finally {
+        clearTimeout(timeout);
+      }
     },
     refetchInterval: 120000,
     staleTime: 120000,
@@ -455,14 +465,19 @@ function FactorResearchTab() {
   // Ensure alphaDecay is always an array (API may return array directly or wrapped)
   const alphaDecay: any[] = Array.isArray(alphaDecayRaw) ? alphaDecayRaw : [];
 
-  const { data: modelWeights } = useQuery<any[]>({
+  const { data: modelWeightsRaw } = useQuery<any>({
     queryKey: ["/api/factors/model-weights"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/factors/model-weights");
       return res.json();
     },
     refetchInterval: 120000,
+    staleTime: 120000,
+    retry: 3,
+    retryDelay: 2000,
   });
+  // Ensure modelWeights is always an array (API may return array or object)
+  const modelWeights: any[] = Array.isArray(modelWeightsRaw) ? modelWeightsRaw : [];
 
   // Auto-select first factor when data loads
   const factors = effectiveness || [];
@@ -656,7 +671,7 @@ function FactorResearchTab() {
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message={alphaDecayLoading ? "Loading alpha decay data..." : "Alpha decay data not yet computed"} icon={TrendingDown} />
+              <EmptyState message={alphaDecayLoading ? "Loading alpha decay data (this may take a moment)..." : "Alpha decay data not yet computed"} icon={TrendingDown} />
             )}
           </div>
         </div>
@@ -774,18 +789,12 @@ function PortfolioTab() {
     ? closedTrades.reduce((s: number, t: any) => s + (t.holdingDays || 0), 0) / closedTrades.length
     : 0;
 
-  function healthColor(health: string | undefined): string {
-    if (!health) return "";
-    if (health === "past_optimal_hold") return "text-loss";
-    if (health === "approaching_exit") return "text-amber-400";
-    return "text-green-400";
-  }
-
-  function healthLabel(health: string | undefined): string {
-    if (!health) return "";
-    if (health === "past_optimal_hold") return "PAST OPT";
-    if (health === "approaching_exit") return "APPROACH EXIT";
-    return "ON TRACK";
+  function getPositionHealth(pos: any): { color: string; label: string } {
+    const pnlPct = pos.unrealizedPnlPct || 0;
+    if (pnlPct < -30) return { color: "text-red-400", label: "AT RISK" };
+    if (pnlPct < -15) return { color: "text-orange-400", label: "UNDERPERFORMING" };
+    if (pnlPct < 0) return { color: "text-amber-400", label: "MONITOR" };
+    return { color: "text-green-400", label: "ON TRACK" };
   }
 
   return (
@@ -872,9 +881,10 @@ function PortfolioTab() {
                       </span>
                     </td>
                     <td className="py-1.5 px-2 text-center">
-                      {pos.signalHealth && (
-                        <span className={`text-[9px] font-bold ${healthColor(pos.signalHealth)}`}>{healthLabel(pos.signalHealth)}</span>
-                      )}
+                      {(() => {
+                        const health = getPositionHealth(pos);
+                        return <span className={`text-[9px] font-bold ${health.color}`}>{health.label}</span>;
+                      })()}
                     </td>
                   </tr>
                 );
@@ -1339,77 +1349,145 @@ function ExecutionTab() {
         </div>
       </div>
 
-      {/* Trade Deviations Table */}
-      <div className="bg-card border border-border rounded-md p-3">
-        <MetricTooltip title="Trade Deviations" description="For each signal-aligned trade, compares your actual execution against the model's recommendation. Shows where you deviated on entry timing, sizing, and holding period.">
-          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Trade Deviations — Signal-Aligned Trades</h3>
-        </MetricTooltip>
-        <div className="overflow-auto max-h-56" style={{ overscrollBehavior: "contain" }}>
-          {deviations && deviations.length > 0 ? (
-            <table className="w-full text-[11px]" data-testid="deviations-table">
-              <thead className="sticky top-0 bg-card z-10">
-                <tr className="border-b border-border text-muted-foreground">
-                  <th className="text-left py-1.5 px-2 font-medium">TICKER</th>
-                  <th className="text-center py-1.5 px-2 font-medium">SCORE</th>
-                  <th className="text-right py-1.5 px-2 font-medium">
-                    <MetricTooltip title="Entry Delay" description="Days between signal and your actual buy."><span className="cursor-help">ENTRY DELAY</span></MetricTooltip>
-                  </th>
-                  <th className="text-right py-1.5 px-2 font-medium">
-                    <MetricTooltip title="Price Gap" description="How much the price moved against you due to late entry."><span className="cursor-help">PRICE GAP</span></MetricTooltip>
-                  </th>
-                  <th className="text-right py-1.5 px-2 font-medium">
-                    <MetricTooltip title="Sizing Deviation" description="Difference between model's recommended position size and your actual."><span className="cursor-help">SIZE DEV</span></MetricTooltip>
-                  </th>
-                  <th className="text-right py-1.5 px-2 font-medium">
-                    <MetricTooltip title="Hold Deviation" description="Difference between model's recommended holding period and your actual."><span className="cursor-help">HOLD DEV</span></MetricTooltip>
-                  </th>
-                  <th className="text-right py-1.5 px-2 font-medium">
-                    <MetricTooltip title="P&L Difference" description="Return difference between your actual trade and the model's recommendation."><span className="cursor-help">P&L DIFF</span></MetricTooltip>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {deviations.map((item: any, i: number) => {
-                  const dev = item.deviation || item;
-                  const trade = item.trade || item;
-                  const ticker = trade.ticker || dev.ticker || "";
-                  const score = dev.signalScore || trade.signalScore || dev.score || 0;
-                  const classification = dev.classification || "independent";
-                  return (
-                  <tr key={i} className="terminal-row border-b border-border/30">
-                    <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
-                    <td className="py-1 px-2 text-center">
-                      {classification === "signal_aligned" ? (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(score)}`}>{score || "ALN"}</span>
-                      ) : (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-gray-500/15 text-gray-400 border border-gray-500/30">IND</span>
-                      )}
-                    </td>
-                    <td className={`py-1 px-2 text-right ${(dev.entryDelayDays || dev.entryDelay || 0) > 1 ? "text-loss" : "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.entryDelayDays != null ? `${dev.entryDelayDays}d` : dev.entryDelay != null ? `${dev.entryDelay}d` : "—"}
-                    </td>
-                    <td className={`py-1 px-2 text-right ${pnlColor(-(dev.entryPriceGapPct || dev.priceGap || 0))}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.entryPriceGapPct != null ? formatPct(dev.entryPriceGapPct) : dev.priceGap != null ? formatPct(dev.priceGap) : "—"}
-                    </td>
-                    <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.sizingDeviationPct != null ? formatPct(dev.sizingDeviationPct) : dev.sizingDeviation != null ? formatPct(dev.sizingDeviation) : "—"}
-                    </td>
-                    <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.holdDeviationDays != null ? `${dev.holdDeviationDays}d` : dev.holdDeviation != null ? `${dev.holdDeviation}d` : "—"}
-                    </td>
-                    <td className={`py-1 px-2 text-right font-medium ${pnlColor(dev.pnlDifference || dev.pnlDiff || 0)}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.pnlDifference != null ? formatPct(dev.pnlDifference) : dev.pnlDiff != null ? formatPct(dev.pnlDiff) : "—"}
-                    </td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <EmptyState message={deviationsLoading ? "Loading trade deviations..." : "No deviation data yet — run signal-trade matching first"} icon={GitCompareArrows} />
-          )}
-        </div>
-      </div>
+      {/* Trade Deviations — Split into Signal-Aligned and Independent */}
+      {(() => {
+        const signalAligned = (deviations || []).filter((item: any) => {
+          const dev = item.deviation || item;
+          return dev.classification === "signal_aligned";
+        });
+        const independent = (deviations || []).filter((item: any) => {
+          const dev = item.deviation || item;
+          return dev.classification !== "signal_aligned";
+        });
+        return (
+          <>
+            {/* Signal-Aligned Trades */}
+            <div className="bg-card border border-border rounded-md p-3">
+              <MetricTooltip title="Signal-Aligned Trades" description="Trades that matched an insider purchase signal. Compares your actual execution against the model's recommendation.">
+                <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Signal-Aligned Trades</h3>
+              </MetricTooltip>
+              <div className="overflow-auto max-h-56" style={{ overscrollBehavior: "contain" }}>
+                {signalAligned.length > 0 ? (
+                  <table className="w-full text-[11px]" data-testid="deviations-table">
+                    <thead className="sticky top-0 bg-card z-10">
+                      <tr className="border-b border-border text-muted-foreground">
+                        <th className="text-left py-1.5 px-2 font-medium">TICKER</th>
+                        <th className="text-center py-1.5 px-2 font-medium">SCORE</th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="Entry Delay" description="Days between signal and your actual buy."><span className="cursor-help">ENTRY DELAY</span></MetricTooltip>
+                        </th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="Price Gap" description="How much the price moved against you due to late entry."><span className="cursor-help">PRICE GAP</span></MetricTooltip>
+                        </th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="Sizing Deviation" description="Difference between model's recommended position size and your actual."><span className="cursor-help">SIZE DEV</span></MetricTooltip>
+                        </th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="Hold Deviation" description="Difference between model's recommended holding period and your actual."><span className="cursor-help">HOLD DEV</span></MetricTooltip>
+                        </th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="P&L Difference" description="Return difference between your actual trade and the model's recommendation."><span className="cursor-help">P&L DIFF</span></MetricTooltip>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {signalAligned.map((item: any, i: number) => {
+                        const dev = item.deviation || item;
+                        const trade = item.trade || item;
+                        const ticker = trade.ticker || dev.ticker || "";
+                        const score = dev.signalScore || trade.signalScore || dev.score || 0;
+                        return (
+                          <tr key={i} className="terminal-row border-b border-border/30">
+                            <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
+                            <td className="py-1 px-2 text-center">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(score)}`}>{score || "ALN"}</span>
+                            </td>
+                            <td className={`py-1 px-2 text-right ${(dev.entryDelayDays || dev.entryDelay || 0) > 1 ? "text-loss" : "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {dev.entryDelayDays != null ? `${dev.entryDelayDays}d` : dev.entryDelay != null ? `${dev.entryDelay}d` : "—"}
+                            </td>
+                            <td className={`py-1 px-2 text-right ${pnlColor(-(dev.entryPriceGapPct || dev.priceGap || 0))}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {dev.entryPriceGapPct != null ? formatPct(dev.entryPriceGapPct) : dev.priceGap != null ? formatPct(dev.priceGap) : "—"}
+                            </td>
+                            <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {dev.sizingDeviationPct != null ? formatPct(dev.sizingDeviationPct) : dev.sizingDeviation != null ? formatPct(dev.sizingDeviation) : "—"}
+                            </td>
+                            <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {dev.holdDeviationDays != null ? `${dev.holdDeviationDays}d` : dev.holdDeviation != null ? `${dev.holdDeviation}d` : "—"}
+                            </td>
+                            <td className={`py-1 px-2 text-right font-medium ${pnlColor(dev.pnlDifference || dev.pnlDiff || 0)}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {dev.pnlDifference != null ? formatPct(dev.pnlDifference) : dev.pnlDiff != null ? formatPct(dev.pnlDiff) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
+                  <EmptyState message={deviationsLoading ? "Loading trade deviations..." : "No signal-aligned trades found — your trades did not match any insider purchase signals"} icon={GitCompareArrows} />
+                )}
+              </div>
+            </div>
+
+            {/* Independent / Discretionary Trades */}
+            <div className="bg-card border border-border rounded-md p-3">
+              <MetricTooltip title="Independent Trades" description="Discretionary trades that were not based on any insider purchase signal. Shows your own alpha generation outside the signal model.">
+                <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 cursor-help">Independent / Discretionary Trades</h3>
+              </MetricTooltip>
+              <div className="overflow-auto max-h-56" style={{ overscrollBehavior: "contain" }}>
+                {independent.length > 0 ? (
+                  <table className="w-full text-[11px]" data-testid="independent-trades-table">
+                    <thead className="sticky top-0 bg-card z-10">
+                      <tr className="border-b border-border text-muted-foreground">
+                        <th className="text-left py-1.5 px-2 font-medium">TICKER</th>
+                        <th className="text-left py-1.5 px-2 font-medium">DATE</th>
+                        <th className="text-center py-1.5 px-2 font-medium">SIDE</th>
+                        <th className="text-right py-1.5 px-2 font-medium">QTY</th>
+                        <th className="text-right py-1.5 px-2 font-medium">AVG PRICE</th>
+                        <th className="text-right py-1.5 px-2 font-medium">TOTAL</th>
+                        <th className="text-right py-1.5 px-2 font-medium">
+                          <MetricTooltip title="P&L Impact" description="Estimated return impact of this independent trade."><span className="cursor-help">P&L</span></MetricTooltip>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {independent.map((item: any, i: number) => {
+                        const dev = item.deviation || item;
+                        const trade = item.trade || item;
+                        const ticker = trade.ticker || dev.ticker || "";
+                        const date = trade.executionDate || dev.executionDate || "";
+                        const side = trade.side || "";
+                        const qty = trade.quantity || 0;
+                        const avgPrice = trade.avgPrice || 0;
+                        const total = trade.totalCost || (qty * avgPrice);
+                        const pnl = dev.pnlDifference ?? dev.pnlDiff ?? null;
+                        return (
+                          <tr key={i} className="terminal-row border-b border-border/30">
+                            <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
+                            <td className="py-1 px-2 text-muted-foreground">{date}</td>
+                            <td className="py-1 px-2 text-center">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${side === "BUY" ? "bg-gain text-[hsl(142,55%,15%)]" : side === "SELL" ? "bg-loss text-[hsl(0,72%,15%)]" : "bg-muted text-muted-foreground"}`}>
+                                {side || "—"}
+                              </span>
+                            </td>
+                            <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{qty > 0 ? formatNumber(qty) : "—"}</td>
+                            <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{avgPrice > 0 ? `$${avgPrice.toFixed(2)}` : "—"}</td>
+                            <td className="py-1 px-2 text-right font-medium" style={{ fontVariantNumeric: "tabular-nums" }}>{total > 0 ? formatCurrency(total) : "—"}</td>
+                            <td className={`py-1 px-2 text-right font-medium ${pnlColor(pnl || 0)}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {pnl != null ? formatPct(pnl) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
+                  <EmptyState message={deviationsLoading ? "Loading trades..." : "No independent trades found"} icon={Briefcase} />
+                )}
+              </div>
+            </div>
+          </>
+        );
+      })()}
 
       {/* Schwab Order History */}
       {schwabStatus?.isConnected && schwabOrders && schwabOrders.length > 0 && (

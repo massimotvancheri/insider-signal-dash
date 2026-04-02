@@ -218,14 +218,35 @@ export async function registerRoutes(
   // ============================================================
 
   /** Performance summary — trade-based analytics with realized/unrealized P&L */
-  app.get("/api/performance/summary", (_req, res) => {
-    // Try trade-engine analytics first (based on actual closed trades)
-    const analytics = getPerformanceAnalytics();
-    if (analytics) {
-      return res.json(analytics);
+  app.get("/api/performance/summary", async (_req, res) => {
+    try {
+      // Try trade-engine analytics first (based on actual closed trades)
+      const analytics = getPerformanceAnalytics();
+      if (analytics) {
+        // If DB positions show zero unrealized P&L, try Schwab live positions
+        if (analytics.totalUnrealizedPnl === 0 && analytics.openPositionCount === 0) {
+          try {
+            const positions = await getPortfolioWithSignalHealth(getSchwabAccessToken);
+            if (positions.length > 0) {
+              const schwabUnrealized = positions.reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+              const schwabMarketValue = positions.reduce((s: number, p: any) => s + (p.marketValue || 0), 0);
+              analytics.totalUnrealizedPnl = schwabUnrealized;
+              analytics.totalMarketValue = schwabMarketValue;
+              analytics.openPositionCount = positions.length;
+              analytics.combinedPnl = analytics.totalRealizedPnl + schwabUnrealized;
+            }
+          } catch (e: any) {
+            console.error("[PERF SUMMARY] Schwab position fetch failed:", e.message);
+          }
+        }
+        return res.json(analytics);
+      }
+      // Fall back to snapshot-based summary
+      res.json(getPerformanceSummary());
+    } catch (err: any) {
+      console.error("[/api/performance/summary ERROR]", err.message);
+      res.status(500).json({ error: err.message });
     }
-    // Fall back to snapshot-based summary
-    res.json(getPerformanceSummary());
   });
 
   /** Performance chart data — equity curves for strategy, user, benchmark */
