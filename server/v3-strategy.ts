@@ -135,23 +135,61 @@ export function getModelWeights() {
 // SIGNAL SCORING & RECOMMENDATIONS
 // ============================================================
 
-/** Get scored signals with factor breakdowns */
+/** Get scored signals with factor breakdowns — deduplicated by (ticker, date), keeping highest ID */
 export function getScoredSignals(limit = 50, minScore?: number) {
-  let query = db.select({
-    signal: purchaseSignals,
-    entryPrice: signalEntryPrices,
-  })
-    .from(purchaseSignals)
-    .leftJoin(signalEntryPrices, eq(purchaseSignals.id, signalEntryPrices.signalId));
-  
-  const results = query
-    .orderBy(desc(purchaseSignals.signalScore), desc(purchaseSignals.signalDate))
-    .limit(limit)
-    .all();
-  
-  return results.map(r => ({
-    ...r.signal,
-    entryPrices: r.entryPrice,
+  // Use raw SQL subquery to deduplicate: one signal per (issuerTicker, signalDate), keep max ID
+  const rows = db.all(sql`
+    SELECT ps.*, sep.id as sep_id, sep.signal_id as sep_signal_id,
+      sep.filing_timestamp as sep_filing_timestamp, sep.prior_close as sep_prior_close,
+      sep.ah_price as sep_ah_price, sep.ah_spread_pct as sep_ah_spread_pct,
+      sep.next_open as sep_next_open, sep.next_vwap as sep_next_vwap,
+      sep.overnight_gap as sep_overnight_gap, sep.ah_net_premium as sep_ah_net_premium,
+      sep.insider_tx_price as sep_insider_tx_price
+    FROM purchase_signals ps
+    LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
+    WHERE ps.id IN (
+      SELECT MAX(id) FROM purchase_signals
+      GROUP BY issuer_ticker, signal_date
+    )
+    ${minScore ? sql`AND ps.signal_score >= ${minScore}` : sql``}
+    ORDER BY ps.signal_score DESC, ps.signal_date DESC
+    LIMIT ${limit}
+  `);
+
+  return (rows as any[]).map((r: any) => ({
+    id: r.id,
+    issuerCik: r.issuer_cik,
+    issuerName: r.issuer_name,
+    issuerTicker: r.issuer_ticker,
+    signalDate: r.signal_date,
+    signalScore: r.signal_score,
+    scoreTier: r.score_tier,
+    factorBreakdown: r.factor_breakdown,
+    clusterSize: r.cluster_size,
+    totalPurchaseValue: r.total_purchase_value,
+    avgPurchasePrice: r.avg_purchase_price,
+    insiderNames: r.insider_names,
+    insiderTitles: r.insider_titles,
+    cSuiteCount: r.c_suite_count,
+    directorCount: r.director_count,
+    daysSpan: r.days_span,
+    comparableCount: r.comparable_count,
+    comparableAvgReturn63d: r.comparable_avg_return_63d,
+    comparableWinRate: r.comparable_win_rate,
+    createdAt: r.created_at,
+    entryPrices: r.sep_id ? {
+      id: r.sep_id,
+      signalId: r.sep_signal_id,
+      filingTimestamp: r.sep_filing_timestamp,
+      priorClose: r.sep_prior_close,
+      ahPrice: r.sep_ah_price,
+      ahSpreadPct: r.sep_ah_spread_pct,
+      nextOpen: r.sep_next_open,
+      nextVwap: r.sep_next_vwap,
+      overnightGap: r.sep_overnight_gap,
+      ahNetPremium: r.sep_ah_net_premium,
+      insiderTxPrice: r.sep_insider_tx_price,
+    } : null,
   }));
 }
 
@@ -290,17 +328,100 @@ export function getMissedSignals(days = 90) {
 // PORTFOLIO — ENHANCED WITH SIGNAL TAGS
 // ============================================================
 
-/** Get portfolio positions with signal health indicators */
-export function getPortfolioWithSignalHealth() {
-  const positions = db.select().from(portfolioPositions).all();
-  
+/** Get portfolio positions with signal health indicators — fetches live Schwab data */
+export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => Promise<string | null>) {
+  let positions: any[] = [];
+
+  // Try to fetch live positions from Schwab API
+  if (getSchwabAccessToken) {
+    try {
+      const token = await getSchwabAccessToken();
+      if (token) {
+        const resp = await fetch("https://api.schwabapi.com/trader/v1/accounts?fields=positions", {
+          headers: { "Authorization": `Bearer ${token}` },
+        });
+        if (resp.ok) {
+          const accounts = await resp.json() as any[];
+          for (const acct of accounts || []) {
+            const acctPositions = acct.securitiesAccount?.positions || [];
+            for (const pos of acctPositions) {
+              const ticker = pos.instrument?.symbol;
+              if (!ticker || pos.instrument?.assetType !== "EQUITY") continue;
+              const qty = pos.longQuantity - (pos.shortQuantity || 0);
+              const currentPrice = qty > 0 ? pos.marketValue / qty : 0;
+              positions.push({
+                ticker,
+                companyName: pos.instrument?.description || ticker,
+                quantity: qty,
+                avgCostBasis: pos.averagePrice || 0,
+                currentPrice,
+                marketValue: pos.marketValue || 0,
+                unrealizedPnl: qty * (currentPrice - (pos.averagePrice || 0)),
+                unrealizedPnlPct: pos.averagePrice ? ((currentPrice - pos.averagePrice) / pos.averagePrice * 100) : 0,
+                dayChange: pos.currentDayProfitLoss || 0,
+                dayChangePct: pos.currentDayProfitLossPercentage || 0,
+                source: "schwab",
+              });
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error("[PORTFOLIO] Schwab API error, falling back to DB:", err.message);
+    }
+  }
+
+  // Fall back to DB positions if Schwab fetch returned nothing
+  if (positions.length === 0) {
+    positions = db.select().from(portfolioPositions).all();
+  }
+
+  // For each position, check if ticker matches a recent purchase signal (last 90 days)
+  const recentSignals = db.all(sql`
+    SELECT id, issuer_ticker, signal_date, signal_score, score_tier
+    FROM purchase_signals
+    WHERE signal_date >= date('now', '-90 days')
+    ORDER BY signal_date DESC
+  `) as any[];
+
+  const signalByTicker = new Map<string, any>();
+  for (const sig of recentSignals) {
+    const ticker = sig.issuer_ticker;
+    if (ticker && !signalByTicker.has(ticker)) {
+      signalByTicker.set(ticker, sig);
+    }
+  }
+
   return positions.map(pos => {
-    // Calculate signal health
+    const matchingSignal = signalByTicker.get(pos.ticker);
+    let signalClassification = "independent";
     let signalHealth = "independent";
     let daysRemaining = null;
     let shouldExit = false;
-    
-    if (pos.signalId && pos.recommendedHoldDays && pos.holdingDays) {
+    let signalId = pos.signalId || null;
+    let signalScoreAtEntry = pos.signalScoreAtEntry || null;
+
+    if (matchingSignal) {
+      signalClassification = "signal_aligned";
+      signalId = matchingSignal.id;
+      signalScoreAtEntry = matchingSignal.signal_score;
+      // Calculate days since signal
+      const signalDate = new Date(matchingSignal.signal_date);
+      const now = new Date();
+      const daysSinceSignal = Math.floor((now.getTime() - signalDate.getTime()) / (1000 * 60 * 60 * 24));
+      const optimalHold = 63; // ~3 months based on typical alpha decay
+      daysRemaining = optimalHold - daysSinceSignal;
+      if (daysRemaining <= 0) {
+        signalHealth = "past_optimal_hold";
+        shouldExit = true;
+      } else if (daysRemaining <= optimalHold * 0.25) {
+        signalHealth = "approaching_exit";
+      } else {
+        signalHealth = "on_track";
+      }
+    } else if (pos.signalId && pos.recommendedHoldDays && pos.holdingDays) {
+      // Fallback to DB-stored signal info
+      signalClassification = "signal_aligned";
       daysRemaining = pos.recommendedHoldDays - pos.holdingDays;
       if (daysRemaining <= 0) {
         signalHealth = "past_optimal_hold";
@@ -311,9 +432,12 @@ export function getPortfolioWithSignalHealth() {
         signalHealth = "on_track";
       }
     }
-    
+
     return {
       ...pos,
+      signalClassification,
+      signalId,
+      signalScoreAtEntry,
       signalHealth,
       daysRemaining,
       shouldExit,

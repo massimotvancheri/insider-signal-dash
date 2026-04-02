@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 import { startV3Polling, getV3PollingStatus } from "./edgar-poller-v3";
 import {
   getFactorResults, getFactorEffectiveness, getFactorHeatmap,
@@ -152,26 +154,34 @@ export async function registerRoutes(
   // TAB 3: PORTFOLIO
   // ============================================================
 
-  /** Portfolio positions with signal health */
-  app.get("/api/portfolio/positions", (_req, res) => {
-    const positions = getPortfolioWithSignalHealth();
-    const totalValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
-    const totalPnl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-    const totalCost = positions.reduce((s, p) => s + (p.avgCostBasis * p.quantity), 0);
-    const signalAligned = positions.filter(p => p.signalClassification === "signal_aligned").length;
+  /** Portfolio positions with signal health — pulls live Schwab data */
+  app.get("/api/portfolio/positions", async (_req, res) => {
+    try {
+      const positions = await getPortfolioWithSignalHealth(getSchwabAccessToken);
+      const totalValue = positions.reduce((s: number, p: any) => s + (p.marketValue || 0), 0);
+      const totalPnl = positions.reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+      const totalCost = positions.reduce((s: number, p: any) => s + (p.avgCostBasis * p.quantity), 0);
+      const totalDayChange = positions.reduce((s: number, p: any) => s + (p.dayChange || 0), 0);
+      const signalAligned = positions.filter((p: any) => p.signalClassification === "signal_aligned").length;
 
-    res.json({
-      positions,
-      summary: {
-        totalValue,
-        totalCost,
-        totalPnl,
-        totalPnlPct: totalCost > 0 ? (totalPnl / totalCost) * 100 : 0,
-        positionCount: positions.length,
-        signalAlignedCount: signalAligned,
-        independentCount: positions.length - signalAligned,
-      },
-    });
+      res.json({
+        positions,
+        summary: {
+          totalValue,
+          totalCost,
+          totalPnl,
+          totalPnlPct: totalCost > 0 ? (totalPnl / totalCost) * 100 : 0,
+          totalDayChange,
+          totalDayChangePct: totalValue > 0 ? (totalDayChange / totalValue) * 100 : 0,
+          positionCount: positions.length,
+          signalAlignedCount: signalAligned,
+          independentCount: positions.length - signalAligned,
+        },
+      });
+    } catch (err: any) {
+      console.error("[/api/portfolio/positions ERROR]", err.message);
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get("/api/portfolio/executions", (req, res) => {
@@ -439,6 +449,180 @@ export async function registerRoutes(
     }
   });
 
+  /** Schwab orders sync — fetch filled orders and create trade executions & deviations */
+  app.post("/api/schwab/sync-orders", async (_req, res) => {
+    try {
+      const token = await getSchwabAccessToken();
+      if (!token) return res.status(401).json({ error: "Schwab not connected or token expired" });
+
+      // Fetch orders from past 60 days
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - 60);
+      const toDate = new Date();
+      const params = new URLSearchParams({
+        fromEnteredTime: fromDate.toISOString(),
+        toEnteredTime: toDate.toISOString(),
+      });
+      const resp = await fetch(`https://api.schwabapi.com/trader/v1/orders?${params}`, {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Schwab API error: ${await resp.text()}` });
+      const orders = (await resp.json()) as any[];
+
+      let createdExecutions = 0;
+      let createdDeviations = 0;
+      let createdClosedTrades = 0;
+
+      for (const order of (orders || [])) {
+        // Only process FILLED orders
+        if (order.status !== "FILLED") continue;
+
+        const legs = order.orderLegCollection || [];
+        for (const leg of legs) {
+          const ticker = leg.instrument?.symbol;
+          if (!ticker || leg.instrument?.assetType !== "EQUITY") continue;
+
+          const side = leg.instruction; // BUY or SELL
+          const quantity = leg.quantity || order.filledQuantity || 0;
+          const avgPrice = order.price || order.stopPrice || 0;
+          const orderId = String(order.orderId || "");
+
+          // Skip if already synced
+          if (orderId && storage.getTradeExecutionByOrderId(orderId)) continue;
+
+          const executionDate = order.closeTime
+            ? new Date(order.closeTime).toISOString().split("T")[0]
+            : new Date(order.enteredTime).toISOString().split("T")[0];
+          const executionTime = order.closeTime
+            ? new Date(order.closeTime).toISOString().split("T")[1]?.split(".")[0]
+            : undefined;
+
+          // Create trade execution
+          const trade = storage.insertTradeExecution({
+            ticker,
+            companyName: leg.instrument?.description || ticker,
+            side: side === "BUY" ? "BUY" : "SELL",
+            quantity,
+            avgPrice,
+            totalCost: quantity * avgPrice,
+            executionDate,
+            executionTime,
+            source: "schwab_sync",
+            orderId,
+            status: "filled",
+            createdAt: new Date().toISOString(),
+          });
+          createdExecutions++;
+
+          if (side === "BUY") {
+            // For BUY orders, check for matching purchase signal (same ticker, signal date within 14 days before trade)
+            const matchingSignals = db.all(sql`
+              SELECT id, signal_score, signal_date FROM purchase_signals
+              WHERE issuer_ticker = ${ticker}
+                AND signal_date >= date(${executionDate}, '-14 days')
+                AND signal_date <= ${executionDate}
+              ORDER BY signal_date DESC
+              LIMIT 1
+            `) as any[];
+
+            const matchingSignal = matchingSignals[0];
+
+            if (matchingSignal) {
+              const signalDate = new Date(matchingSignal.signal_date);
+              const tradeDate = new Date(executionDate);
+              const entryDelayDays = Math.floor((tradeDate.getTime() - signalDate.getTime()) / (1000 * 60 * 60 * 24));
+
+              storage.insertExecutionDeviation({
+                userTradeId: trade.id,
+                signalId: matchingSignal.id,
+                classification: "signal_aligned",
+                entryDelayDays,
+                entryPriceGapPct: null,
+                sizingDeviationPct: null,
+                holdDeviationDays: null,
+                exitType: null,
+                pnlDifference: null,
+                alphaCost: null,
+                createdAt: new Date().toISOString(),
+              });
+            } else {
+              storage.insertExecutionDeviation({
+                userTradeId: trade.id,
+                signalId: null,
+                classification: "independent",
+                entryDelayDays: null,
+                entryPriceGapPct: null,
+                sizingDeviationPct: null,
+                holdDeviationDays: null,
+                exitType: null,
+                pnlDifference: null,
+                alphaCost: null,
+                createdAt: new Date().toISOString(),
+              });
+            }
+            createdDeviations++;
+          } else if (side === "SELL") {
+            // For SELL orders, try to match against open BUY executions to create closed trades
+            const openBuys = db.all(sql`
+              SELECT te.* FROM trade_executions te
+              WHERE te.ticker = ${ticker}
+                AND te.side = 'BUY'
+                AND te.id NOT IN (SELECT ct.id FROM closed_trades ct WHERE ct.ticker = ${ticker})
+              ORDER BY te.execution_date ASC
+              LIMIT 1
+            `) as any[];
+
+            const matchingBuy = openBuys[0];
+            if (matchingBuy) {
+              const entryDate = matchingBuy.execution_date;
+              const entryPrice = matchingBuy.avg_price;
+              const exitPrice = avgPrice;
+              const holdingDays = Math.floor((new Date(executionDate).getTime() - new Date(entryDate).getTime()) / (1000 * 60 * 60 * 24));
+              const realizedPnl = (exitPrice - entryPrice) * quantity;
+              const realizedPnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
+
+              // Check if the buy had a signal
+              const buyDeviation = db.all(sql`
+                SELECT ed.classification, ed.signal_id FROM execution_deviations ed
+                WHERE ed.user_trade_id = ${matchingBuy.id}
+                LIMIT 1
+              `) as any[];
+
+              storage.insertClosedTrade({
+                ticker,
+                companyName: leg.instrument?.description || ticker,
+                entryDate,
+                exitDate: executionDate,
+                entryPrice,
+                exitPrice,
+                quantity,
+                realizedPnl,
+                realizedPnlPct,
+                holdingDays,
+                signalClassification: buyDeviation[0]?.classification || "independent",
+                signalId: buyDeviation[0]?.signal_id || null,
+                exitType: "discretionary",
+                createdAt: new Date().toISOString(),
+              });
+              createdClosedTrades++;
+            }
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        createdExecutions,
+        createdDeviations,
+        createdClosedTrades,
+        totalOrders: orders?.length || 0,
+      });
+    } catch (err: any) {
+      console.error("[SCHWAB SYNC-ORDERS] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   /** Polling status */
   app.get("/api/status", (_req, res) => {
     res.json(getV3PollingStatus());
@@ -521,21 +705,64 @@ export async function registerRoutes(
     }
   });
 
-  // Admin: enrich prices
+  // Admin: enrich prices — supports continuous=true for auto-loop
+  let enrichmentRunning = false;
+  let enrichmentContinuous = false;
+
+  function runEnrichmentBatch() {
+    const { exec } = require("child_process");
+    enrichmentRunning = true;
+    console.log("[ENRICH] Starting batch...");
+    exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2020", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
+      (error: any, stdout: string, stderr: string) => {
+        enrichmentRunning = false;
+        if (error) console.error("[ENRICH] Batch failed:", error.message);
+        if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
+        if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
+
+        // If continuous mode is on, schedule next batch after 5s delay
+        if (enrichmentContinuous && !error) {
+          // Check if all signals are enriched
+          const status = getDataPipelineStatus();
+          if (status.enrichmentProgress >= 100) {
+            console.log("[ENRICH] All signals enriched. Stopping continuous mode.");
+            enrichmentContinuous = false;
+          } else {
+            console.log(`[ENRICH] Continuous mode: ${status.enrichmentProgress}% done. Next batch in 5s...`);
+            setTimeout(runEnrichmentBatch, 5000);
+          }
+        }
+      }
+    );
+  }
+
   app.post("/api/admin/enrich", (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
-    const { exec } = require("child_process");
-    exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2020", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
-      (error: any, stdout: string, stderr: string) => {
-        if (error) console.error("[ENRICH] Failed:", error.message);
-        if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
-        if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
+
+    const continuous = req.query.continuous === "true" || req.body?.continuous === true;
+
+    if (continuous) {
+      enrichmentContinuous = true;
+      if (!enrichmentRunning) {
+        runEnrichmentBatch();
       }
-    );
-    res.json({ status: "enrichment_started" });
+      return res.json({ status: "enrichment_started", mode: "continuous", message: "Will auto-continue until all signals are enriched" });
+    }
+
+    // Stop continuous mode if explicitly called without continuous flag while running
+    if (enrichmentContinuous && enrichmentRunning) {
+      enrichmentContinuous = false;
+      return res.json({ status: "continuous_stopped", message: "Continuous enrichment will stop after current batch completes" });
+    }
+
+    enrichmentContinuous = false;
+    if (!enrichmentRunning) {
+      runEnrichmentBatch();
+    }
+    res.json({ status: "enrichment_started", mode: "single_batch" });
   });
 
   // Admin: backfill SEC data

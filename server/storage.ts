@@ -3,6 +3,7 @@ import {
   purchaseSignals,
   pollingState,
   tradeExecutions,
+  executionDeviations,
   portfolioPositions,
   strategySnapshots,
   schwabConfig,
@@ -21,6 +22,8 @@ import {
   type InsertClosedTrade,
   type ClosedTrade,
   type SchwabConfig,
+  type InsertDeviation,
+  type ExecutionDeviation,
 } from "@shared/schema";
 import { eq, desc, sql, and, gte, lte, count, asc } from "drizzle-orm";
 import { db, sqlite } from "./db";
@@ -70,6 +73,10 @@ export interface IStorage {
   // V2: Closed Trades
   insertClosedTrade(trade: InsertClosedTrade): ClosedTrade;
   getClosedTrades(limit?: number): ClosedTrade[];
+
+  // V2: Execution Deviations
+  insertExecutionDeviation(dev: InsertDeviation): ExecutionDeviation;
+  getTradeExecutionByOrderId(orderId: string): TradeExecution | undefined;
 
   // V2: Schwab Config
   getSchwabConfig(): SchwabConfig | undefined;
@@ -393,6 +400,18 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(closedTrades.exitDate))
       .limit(limit)
       .all();
+  }
+
+  // ========== V2: Execution Deviations ==========
+
+  insertExecutionDeviation(dev: InsertDeviation): ExecutionDeviation {
+    return db.insert(executionDeviations).values(dev).returning().get();
+  }
+
+  getTradeExecutionByOrderId(orderId: string): TradeExecution | undefined {
+    return db.select().from(tradeExecutions)
+      .where(eq(tradeExecutions.orderId, orderId))
+      .get();
   }
 
   // ========== V2: Schwab Config ==========

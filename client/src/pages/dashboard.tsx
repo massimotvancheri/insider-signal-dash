@@ -419,9 +419,10 @@ function FactorResearchTab() {
 
   // Need to compute effectiveSelectedFactor early for heatmap query
   const firstFactorName = (effectiveness || [])[0]?.factor_name || (effectiveness || [])[0]?.factorName || "";
-  const heatmapFactor = selectedFactor || firstFactorName;
+  // Default to "ownership_type" (known good factor) if no factor selected and effectiveness not loaded yet
+  const heatmapFactor = selectedFactor || firstFactorName || "ownership_type";
 
-  const { data: heatmapData } = useQuery<any>({
+  const { data: heatmapDataRaw } = useQuery<any>({
     queryKey: ["/api/factors/heatmap", heatmapFactor],
     queryFn: async () => {
       if (!heatmapFactor) return null;
@@ -430,8 +431,10 @@ function FactorResearchTab() {
     },
     enabled: !!heatmapFactor,
   });
+  // Ensure heatmapData is always an array
+  const heatmapData: any[] = Array.isArray(heatmapDataRaw) ? heatmapDataRaw : [];
 
-  const { data: alphaDecay } = useQuery<any[]>({
+  const { data: alphaDecayRaw } = useQuery<any>({
     queryKey: ["/api/factors/alpha-decay"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/factors/alpha-decay");
@@ -439,6 +442,8 @@ function FactorResearchTab() {
     },
     refetchInterval: 120000,
   });
+  // Ensure alphaDecay is always an array (API may return array directly or wrapped)
+  const alphaDecay: any[] = Array.isArray(alphaDecayRaw) ? alphaDecayRaw : [];
 
   const { data: modelWeights } = useQuery<any[]>({
     queryKey: ["/api/factors/model-weights"],
@@ -561,7 +566,7 @@ function FactorResearchTab() {
             </select>
           </div>
           <div className="overflow-auto" style={{ overscrollBehavior: "contain" }}>
-            {heatmapData && Array.isArray(heatmapData) && heatmapData.length > 0 ? (() => {
+            {heatmapData.length > 0 ? (() => {
               // Pivot raw rows (sliceName, horizon, meanExcessReturn, sampleSize) into table format
               const horizonNums = [1, 5, 21, 63, 126, 252];
               const sliceMap = new Map<string, Record<string, { ret: number; n: number }>>(); 
@@ -1750,6 +1755,15 @@ export default function Dashboard() {
     refetchInterval: 30000,
   });
 
+  const { data: pipelineStatus } = useQuery<any>({
+    queryKey: ["/api/settings/pipeline-status"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/settings/pipeline-status");
+      return res.json();
+    },
+    refetchInterval: 30000,
+  });
+
   const pollingStatus = dashboard?.pollingStatus;
 
   const tabs = [
@@ -1819,6 +1833,29 @@ export default function Dashboard() {
           </span>
         </div>
       </header>
+
+      {/* Enrichment Progress Banner */}
+      {pipelineStatus && pipelineStatus.enrichmentProgress < 100 && pipelineStatus.totalSignals > 0 && (
+        <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
+          <div className="flex items-center gap-3">
+            <Database className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] text-amber-300 font-medium">
+                  Data Enrichment: {pipelineStatus.enrichmentProgress}% complete ({formatNumber(pipelineStatus.enrichedSignals || 0)} / {formatNumber(pipelineStatus.totalSignals)} signals)
+                </span>
+                <span className="text-[10px] text-amber-400/60">Analytics improve as enrichment progresses</span>
+              </div>
+              <div className="w-full h-1.5 bg-amber-900/30 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-amber-500 rounded-full transition-all duration-1000"
+                  style={{ width: `${Math.max(pipelineStatus.enrichmentProgress, 1)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 overflow-auto p-3" style={{ overscrollBehavior: "contain" }}>
