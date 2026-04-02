@@ -720,16 +720,17 @@ export async function registerRoutes(
         if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
 
-        // If continuous mode is on, schedule next batch after 5s delay
-        if (enrichmentContinuous && !error) {
+        // If continuous mode is on, schedule next batch (retry even on error)
+        if (enrichmentContinuous) {
           // Check if all signals are enriched
           const status = getDataPipelineStatus();
           if (status.enrichmentProgress >= 100) {
             console.log("[ENRICH] All signals enriched. Stopping continuous mode.");
             enrichmentContinuous = false;
           } else {
-            console.log(`[ENRICH] Continuous mode: ${status.enrichmentProgress}% done. Next batch in 5s...`);
-            setTimeout(runEnrichmentBatch, 5000);
+            const delay = error ? 30000 : 5000; // 30s retry on error, 5s on success
+            console.log(`[ENRICH] Continuous mode: ${status.enrichmentProgress}% done. Next batch in ${delay/1000}s...${error ? ' (retrying after error)' : ''}`);
+            setTimeout(runEnrichmentBatch, delay);
           }
         }
       }
