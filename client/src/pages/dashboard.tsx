@@ -415,6 +415,9 @@ function FactorResearchTab() {
       return res.json();
     },
     refetchInterval: 120000,
+    staleTime: 120000,
+    retry: 3,
+    retryDelay: 2000,
   });
 
   // Need to compute effectiveSelectedFactor early for heatmap query
@@ -422,7 +425,7 @@ function FactorResearchTab() {
   // Default to "ownership_type" (known good factor) if no factor selected and effectiveness not loaded yet
   const heatmapFactor = selectedFactor || firstFactorName || "ownership_type";
 
-  const { data: heatmapDataRaw } = useQuery<any>({
+  const { data: heatmapDataRaw, isLoading: heatmapLoading } = useQuery<any>({
     queryKey: ["/api/factors/heatmap", heatmapFactor],
     queryFn: async () => {
       if (!heatmapFactor) return null;
@@ -430,11 +433,15 @@ function FactorResearchTab() {
       return res.json();
     },
     enabled: !!heatmapFactor,
+    staleTime: 120000,
+    retry: 3,
+    retryDelay: 2000,
+    refetchInterval: 120000,
   });
   // Ensure heatmapData is always an array
   const heatmapData: any[] = Array.isArray(heatmapDataRaw) ? heatmapDataRaw : [];
 
-  const { data: alphaDecayRaw } = useQuery<any>({
+  const { data: alphaDecayRaw, isLoading: alphaDecayLoading } = useQuery<any>({
     queryKey: ["/api/factors/alpha-decay"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/factors/alpha-decay");
@@ -442,7 +449,8 @@ function FactorResearchTab() {
     },
     refetchInterval: 120000,
     staleTime: 120000,
-    retry: 2,
+    retry: 3,
+    retryDelay: 3000,
   });
   // Ensure alphaDecay is always an array (API may return array directly or wrapped)
   const alphaDecay: any[] = Array.isArray(alphaDecayRaw) ? alphaDecayRaw : [];
@@ -613,7 +621,7 @@ function FactorResearchTab() {
                 </table>
               );
             })() : (
-              <EmptyState message={effectiveSelectedFactor ? "Loading heatmap data..." : "Select a factor to view heatmap"} icon={Layers} />
+              <EmptyState message={heatmapLoading ? "Loading heatmap data..." : effectiveSelectedFactor ? "No heatmap data available for this factor" : "Select a factor to view heatmap"} icon={Layers} />
             )}
           </div>
         </div>
@@ -648,7 +656,7 @@ function FactorResearchTab() {
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="Alpha decay data not yet computed" icon={TrendingDown} />
+              <EmptyState message={alphaDecayLoading ? "Loading alpha decay data..." : "Alpha decay data not yet computed"} icon={TrendingDown} />
             )}
           </div>
         </div>
@@ -703,7 +711,7 @@ function FactorResearchTab() {
 // TAB 3: PORTFOLIO
 // ====================================================================
 function PortfolioTab() {
-  const { data: portfolioData } = useQuery<any>({
+  const { data: portfolioData, isLoading: portfolioLoading } = useQuery<any>({
     queryKey: ["/api/portfolio/positions"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/portfolio/positions");
@@ -711,7 +719,8 @@ function PortfolioTab() {
     },
     refetchInterval: 30000,
     staleTime: 30000,
-    retry: 2,
+    retry: 3,
+    retryDelay: 2000,
   });
 
   const { data: schwabPositions } = useQuery<any[]>({
@@ -852,7 +861,7 @@ function PortfolioTab() {
                 );
               })}
               {positions.length === 0 && (
-                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">No open positions — connect Schwab to start tracking</td></tr>
+                <tr><td colSpan={10} className="text-center py-6 text-muted-foreground">{portfolioLoading ? "Loading positions..." : "No open positions — connect Schwab to start tracking"}</td></tr>
               )}
             </tbody>
           </table>
@@ -1156,7 +1165,7 @@ function PerformanceTab() {
 // TAB 5: EXECUTION ANALYSIS
 // ====================================================================
 function ExecutionTab() {
-  const { data: execSummary } = useQuery<any>({
+  const { data: execSummary, isLoading: execLoading } = useQuery<any>({
     queryKey: ["/api/execution/summary"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/execution/summary");
@@ -1164,10 +1173,11 @@ function ExecutionTab() {
     },
     refetchInterval: 60000,
     staleTime: 60000,
-    retry: 2,
+    retry: 3,
+    retryDelay: 2000,
   });
 
-  const { data: missedSignals } = useQuery<any[]>({
+  const { data: missedSignals, isLoading: missedLoading } = useQuery<any[]>({
     queryKey: ["/api/execution/missed-signals"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/execution/missed-signals?days=90");
@@ -1175,10 +1185,11 @@ function ExecutionTab() {
     },
     refetchInterval: 120000,
     staleTime: 120000,
-    retry: 2,
+    retry: 3,
+    retryDelay: 2000,
   });
 
-  const { data: deviations } = useQuery<any[]>({
+  const { data: deviations, isLoading: deviationsLoading } = useQuery<any[]>({
     queryKey: ["/api/execution/deviations"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/execution/deviations");
@@ -1186,7 +1197,8 @@ function ExecutionTab() {
     },
     refetchInterval: 120000,
     staleTime: 120000,
-    retry: 2,
+    retry: 3,
+    retryDelay: 2000,
   });
 
   const { data: schwabOrders } = useQuery<any[]>({
@@ -1280,7 +1292,7 @@ function ExecutionTab() {
               </tbody>
             </table>
           ) : (
-            <EmptyState message="No missed signals data yet — connect Schwab to start tracking execution" icon={EyeOff} />
+            <EmptyState message={missedLoading ? "Loading missed signals..." : "No missed signals data yet"} icon={EyeOff} />
           )}
         </div>
       </div>
@@ -1315,33 +1327,39 @@ function ExecutionTab() {
                 </tr>
               </thead>
               <tbody>
-                {deviations.map((dev: any, i: number) => (
+                {deviations.map((item: any, i: number) => {
+                  const dev = item.deviation || item;
+                  const trade = item.trade || item;
+                  const ticker = trade.ticker || dev.ticker || "";
+                  const score = dev.signalScore || trade.signalScore || dev.score || 0;
+                  return (
                   <tr key={i} className="terminal-row border-b border-border/30">
-                    <td className="py-1 px-2 font-bold text-primary">{dev.ticker}</td>
+                    <td className="py-1 px-2 font-bold text-primary">{ticker}</td>
                     <td className="py-1 px-2 text-center">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(dev.signalScore || dev.score || 0)}`}>{dev.signalScore || dev.score || 0}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getSignalClass(score)}`}>{score}</span>
                     </td>
-                    <td className={`py-1 px-2 text-right ${(dev.entryDelay || 0) > 1 ? "text-loss" : "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.entryDelay != null ? `${dev.entryDelay}d` : "—"}
+                    <td className={`py-1 px-2 text-right ${(dev.entryDelayDays || dev.entryDelay || 0) > 1 ? "text-loss" : "text-foreground"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                      {dev.entryDelayDays != null ? `${dev.entryDelayDays}d` : dev.entryDelay != null ? `${dev.entryDelay}d` : "—"}
                     </td>
-                    <td className={`py-1 px-2 text-right ${pnlColor(-(dev.priceGap || 0))}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.priceGap != null ? formatPct(dev.priceGap) : "—"}
-                    </td>
-                    <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.sizingDeviation != null ? formatPct(dev.sizingDeviation) : dev.sizeDeviation != null ? formatPct(dev.sizeDeviation) : "—"}
+                    <td className={`py-1 px-2 text-right ${pnlColor(-(dev.entryPriceGapPct || dev.priceGap || 0))}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                      {dev.entryPriceGapPct != null ? formatPct(dev.entryPriceGapPct) : dev.priceGap != null ? formatPct(dev.priceGap) : "—"}
                     </td>
                     <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.holdDeviation != null ? `${dev.holdDeviation}d` : "—"}
+                      {dev.sizingDeviationPct != null ? formatPct(dev.sizingDeviationPct) : dev.sizingDeviation != null ? formatPct(dev.sizingDeviation) : "—"}
                     </td>
-                    <td className={`py-1 px-2 text-right font-medium ${pnlColor(dev.pnlDiff || dev.pnlDifference || 0)}`} style={{ fontVariantNumeric: "tabular-nums" }}>
-                      {dev.pnlDiff != null ? formatPct(dev.pnlDiff) : dev.pnlDifference != null ? formatPct(dev.pnlDifference) : "—"}
+                    <td className="py-1 px-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                      {dev.holdDeviationDays != null ? `${dev.holdDeviationDays}d` : dev.holdDeviation != null ? `${dev.holdDeviation}d` : "—"}
+                    </td>
+                    <td className={`py-1 px-2 text-right font-medium ${pnlColor(dev.pnlDifference || dev.pnlDiff || 0)}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+                      {dev.pnlDifference != null ? formatPct(dev.pnlDifference) : dev.pnlDiff != null ? formatPct(dev.pnlDiff) : "—"}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           ) : (
-            <EmptyState message="No deviation data yet — connect Schwab to start tracking trade execution against signals" icon={GitCompareArrows} />
+            <EmptyState message={deviationsLoading ? "Loading trade deviations..." : "No deviation data yet"} icon={GitCompareArrows} />
           )}
         </div>
       </div>
