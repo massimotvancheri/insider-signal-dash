@@ -328,13 +328,20 @@ def main():
         time.sleep(0.15)
         
         # Enrich each signal
+        ticker_success = 0
         for sig in ticker_signals:
             try:
                 ok = compute_forward_returns(conn, sig, prices, spy_data)
                 if ok:
                     success_count += 1
+                    ticker_success += 1
             except Exception as e:
-                pass
+                pass  # Likely duplicate — already enriched
+        
+        # If no signals for this ticker were enriched, mark it as failed
+        if ticker_success == 0:
+            fail_count += 1
+            mark_ticker_failed(conn, ticker)
         
         # Commit every 10 tickers
         if (i + 1) % 10 == 0:
