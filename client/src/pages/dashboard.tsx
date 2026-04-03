@@ -2008,7 +2008,7 @@ export default function Dashboard() {
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[11px] text-amber-300 font-medium">
-                  Data Enrichment: {pipelineStatus.enrichmentProgress}% complete ({formatNumber(pipelineStatus.enrichedSignals || 0)} / {formatNumber(pipelineStatus.totalSignals)} signals)
+                  Data Enrichment: {pipelineStatus.enrichmentProgress}% complete ({formatNumber(pipelineStatus.enrichedSignals || 0)} / {formatNumber((pipelineStatus as any).enrichableSignals || pipelineStatus.totalSignals)} signals){(pipelineStatus as any).skippedSignals > 0 ? ` · ${formatNumber((pipelineStatus as any).skippedSignals)} skipped (no market data)` : ''}
                 </span>
                 <span className="text-[10px] text-amber-400/60">Analytics improve as enrichment progresses</span>
               </div>

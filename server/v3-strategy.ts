@@ -452,15 +452,32 @@ export function getDataPipelineStatus() {
   const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
   const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
   
+  // Count signals with tickers that permanently failed enrichment (no price data available)
+  let skippedCount = 0;
+  try {
+    const skipped = db.all(sql`
+      SELECT COUNT(*) as count FROM purchase_signals 
+      WHERE issuer_ticker IN (SELECT ticker FROM enrichment_failed_tickers WHERE fail_count >= 2)
+    `);
+    skippedCount = (skipped as any)?.[0]?.count || 0;
+  } catch (e) {
+    // Table may not exist yet
+  }
+  
+  const enrichable = (signalCount?.count || 0) - skippedCount;
+  const enriched = enrichedCount?.count || 0;
+  
   return {
     totalPurchases: txCount?.count || 0,
     totalSignals: signalCount?.count || 0,
-    enrichedSignals: enrichedCount?.count || 0,
+    enrichedSignals: enriched,
+    skippedSignals: skippedCount,
+    enrichableSignals: enrichable,
     forwardReturnDataPoints: fwdReturnCount?.count || 0,
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
-    enrichmentProgress: signalCount?.count ? 
-      Math.round(((enrichedCount?.count || 0) / signalCount.count) * 100) : 0,
+    enrichmentProgress: enrichable > 0 ? 
+      Math.round((enriched / enrichable) * 100) : 0,
   };
 }

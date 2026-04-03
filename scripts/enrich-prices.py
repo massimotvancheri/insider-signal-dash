@@ -26,10 +26,20 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    # Create failed tickers table if not exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS enrichment_failed_tickers (
+            ticker TEXT PRIMARY KEY,
+            fail_count INTEGER DEFAULT 1,
+            last_failed_at TEXT
+        )
+    """)
+    conn.commit()
     return conn
 
 def get_signals_to_enrich(conn, start_year=2020, max_signals=5000):
-    """Get signals that need enrichment, prioritized by score and recency."""
+    """Get signals that need enrichment, prioritized by score and recency.
+    Excludes tickers that have permanently failed (no data on Yahoo Finance)."""
     cursor = conn.execute("""
         SELECT ps.id, ps.issuer_ticker, ps.signal_date, ps.signal_score, ps.avg_purchase_price
         FROM purchase_signals ps
@@ -39,10 +49,22 @@ def get_signals_to_enrich(conn, start_year=2020, max_signals=5000):
           AND ps.issuer_ticker != 'N/A'
           AND ps.signal_date >= ?
           AND ps.id NOT IN (SELECT signal_id FROM signal_entry_prices)
+          AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers WHERE fail_count >= 2)
         ORDER BY ps.signal_score DESC, ps.signal_date DESC
         LIMIT ?
     """, (f"{start_year}-01-01", max_signals))
     return cursor.fetchall()
+
+def mark_ticker_failed(conn, ticker):
+    """Mark a ticker as failed so it's skipped in future batches."""
+    conn.execute("""
+        INSERT INTO enrichment_failed_tickers (ticker, fail_count, last_failed_at)
+        VALUES (?, 1, ?)
+        ON CONFLICT(ticker) DO UPDATE SET
+          fail_count = fail_count + 1,
+          last_failed_at = ?
+    """, (ticker, datetime.now().isoformat(), datetime.now().isoformat()))
+    conn.commit()
 
 def fetch_spy_data():
     """Fetch SPY benchmark data for the full period."""
@@ -297,6 +319,7 @@ def main():
         
         if not prices:
             fail_count += 1
+            mark_ticker_failed(conn, ticker)
             if (i + 1) % 50 == 0:
                 print(f"  [{i+1}/{len(tickers)}] {ticker}: no data | Total: {success_count} enriched, {fail_count} failed")
             continue
