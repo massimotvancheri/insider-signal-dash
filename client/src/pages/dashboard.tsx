@@ -1864,7 +1864,7 @@ function SettingsTab() {
           <p>The V3 composite score is derived from <span className="text-foreground font-bold">11 empirical factors</span>, each weighted by its actual predictive power for forward returns. Unlike V2's equal-weighted 4-factor model, V3 weights are <span className="text-primary">derived from data</span>, not academic assumptions.</p>
 
           {/* Current Model Weights Table */}
-          {modelWeights.length > 0 ? (
+          {modelWeights && modelWeights.length > 0 ? (
             <div className="overflow-auto">
               <table className="w-full text-[11px]">
                 <thead>
