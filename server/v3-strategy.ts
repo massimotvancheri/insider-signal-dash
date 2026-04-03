@@ -446,6 +446,14 @@ export function getDataPipelineStatus() {
     .get();
   
   const signalCount = db.select({ count: sql<number>`count(*)` }).from(purchaseSignals).get();
+  // Enrichment only processes signals from 2020+, so count only those for progress
+  const enrichableSignalCount = db.select({ count: sql<number>`count(*)` })
+    .from(purchaseSignals)
+    .where(and(
+      gte(purchaseSignals.signalDate, '2020-01-01'),
+      sql`${purchaseSignals.issuerTicker} IS NOT NULL AND ${purchaseSignals.issuerTicker} != '' AND ${purchaseSignals.issuerTicker} != 'NONE' AND ${purchaseSignals.issuerTicker} != 'N/A'`
+    ))
+    .get();
   const enrichedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
   const fwdReturnCount = db.select({ count: sql<number>`count(*)` }).from(dailyForwardReturns).get();
   const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
@@ -468,7 +476,8 @@ export function getDataPipelineStatus() {
     // Table may not exist yet
   }
   
-  const total = signalCount?.count || 0;
+  const totalAll = signalCount?.count || 0;
+  const totalEnrichable = enrichableSignalCount?.count || 0;
   const enriched = enrichedCount?.count || 0;
   const attempted = attemptedCount?.count || 0;
   // Processed = signals with entry prices (attempted) + permanently skipped tickers
@@ -476,17 +485,18 @@ export function getDataPipelineStatus() {
   
   return {
     totalPurchases: txCount?.count || 0,
-    totalSignals: total,
+    totalSignals: totalAll,
     enrichedSignals: enriched,
     skippedSignals: skippedCount,
     processedSignals: processed,
-    enrichableSignals: total - skippedCount,
+    enrichableSignals: totalEnrichable,
+    preEnrichmentExcluded: totalAll - totalEnrichable,
     forwardReturnDataPoints: fwdReturnCount?.count || 0,
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
-    // Progress: enriched out of total, with skipped signals as a separate category
-    enrichmentProgress: total > 0 ? 
-      Math.round((processed / total) * 100) : 0,
+    // Progress: processed out of enrichable signals (2020+ with valid tickers)
+    enrichmentProgress: totalEnrichable > 0 ? 
+      Math.round((processed / totalEnrichable) * 100) : 0,
   };
 }
