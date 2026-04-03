@@ -497,6 +497,6 @@ export function getDataPipelineStatus() {
     insiderProfiles: insiderCount?.count || 0,
     // Progress: processed out of enrichable signals (2020+ with valid tickers)
     enrichmentProgress: totalEnrichable > 0 ? 
-      Math.round((processed / totalEnrichable) * 100) : 0,
+      Math.min(100, Math.round((processed / totalEnrichable) * 100)) : 0,
   };
 }
