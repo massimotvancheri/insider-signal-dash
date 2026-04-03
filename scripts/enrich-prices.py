@@ -49,7 +49,7 @@ def get_signals_to_enrich(conn, start_year=2020, max_signals=5000):
           AND ps.issuer_ticker != 'N/A'
           AND ps.signal_date >= ?
           AND ps.id NOT IN (SELECT signal_id FROM signal_entry_prices)
-          AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers WHERE fail_count >= 2)
+          AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers)
         ORDER BY ps.signal_score DESC, ps.signal_date DESC
         LIMIT ?
     """, (f"{start_year}-01-01", max_signals))

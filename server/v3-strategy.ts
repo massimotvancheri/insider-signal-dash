@@ -460,7 +460,7 @@ export function getDataPipelineStatus() {
   try {
     const skipped = db.all(sql`
       SELECT COUNT(*) as count FROM purchase_signals 
-      WHERE issuer_ticker IN (SELECT ticker FROM enrichment_failed_tickers WHERE fail_count >= 2)
+      WHERE issuer_ticker IN (SELECT ticker FROM enrichment_failed_tickers)
         AND id NOT IN (SELECT signal_id FROM signal_entry_prices)
     `);
     skippedCount = (skipped as any)?.[0]?.count || 0;
