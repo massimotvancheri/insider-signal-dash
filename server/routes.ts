@@ -782,8 +782,8 @@ export async function registerRoutes(
         if (enrichmentContinuous) {
           // Check if all signals are enriched
           const status = getDataPipelineStatus();
-          if (status.enrichmentProgress >= 100) {
-            console.log("[ENRICH] All signals enriched. Stopping continuous mode.");
+          if (status.enrichmentProgress >= 100 || (status as any).processedSignals >= status.totalSignals) {
+            console.log(`[ENRICH] Enrichment complete: ${status.enrichedSignals} enriched, ${(status as any).skippedSignals || 0} skipped. Stopping continuous mode.`);
             enrichmentContinuous = false;
           } else {
             const delay = error ? 30000 : 5000; // 30s retry on error, 5s on success

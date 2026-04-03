@@ -452,32 +452,41 @@ export function getDataPipelineStatus() {
   const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
   const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
   
+  // Count signals that have entry prices recorded (attempted enrichment)
+  const attemptedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
+  
   // Count signals with tickers that permanently failed enrichment (no price data available)
   let skippedCount = 0;
   try {
     const skipped = db.all(sql`
       SELECT COUNT(*) as count FROM purchase_signals 
       WHERE issuer_ticker IN (SELECT ticker FROM enrichment_failed_tickers WHERE fail_count >= 2)
+        AND id NOT IN (SELECT signal_id FROM signal_entry_prices)
     `);
     skippedCount = (skipped as any)?.[0]?.count || 0;
   } catch (e) {
     // Table may not exist yet
   }
   
-  const enrichable = (signalCount?.count || 0) - skippedCount;
+  const total = signalCount?.count || 0;
   const enriched = enrichedCount?.count || 0;
+  const attempted = attemptedCount?.count || 0;
+  // Processed = signals with entry prices (attempted) + permanently skipped tickers
+  const processed = attempted + skippedCount;
   
   return {
     totalPurchases: txCount?.count || 0,
-    totalSignals: signalCount?.count || 0,
+    totalSignals: total,
     enrichedSignals: enriched,
     skippedSignals: skippedCount,
-    enrichableSignals: enrichable,
+    processedSignals: processed,
+    enrichableSignals: total - skippedCount,
     forwardReturnDataPoints: fwdReturnCount?.count || 0,
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
-    enrichmentProgress: enrichable > 0 ? 
-      Math.round((enriched / enrichable) * 100) : 0,
+    // Progress: enriched out of total, with skipped signals as a separate category
+    enrichmentProgress: total > 0 ? 
+      Math.round((processed / total) * 100) : 0,
   };
 }
