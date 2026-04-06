@@ -82,55 +82,44 @@ export function getFactorHeatmap(factorName: string) {
     .all();
 }
 
-/** Get alpha decay curve — reads from pre-computed cache table.
- *  The actual aggregation (23M+ rows) is done during factor research, not on demand. */
+const ALPHA_DECAY_CACHE_PATH = "/opt/insider-signal-dash/alpha-decay-cache.json";
+const fs = require("fs");
+
+/** Get alpha decay curve — reads from pre-computed JSON file.
+ *  The actual aggregation (23M+ rows) is done via admin endpoint, not on demand. */
 export function getAlphaDecayCurve(options: {
   factorName?: string;
   sliceName?: string;
   scoreTier?: number;
 } = {}) {
   try {
-    const rows = db.all(sql`SELECT * FROM alpha_decay_cache ORDER BY trading_day`);
-    if (rows && (rows as any[]).length > 0) return rows;
+    if (fs.existsSync(ALPHA_DECAY_CACHE_PATH)) {
+      return JSON.parse(fs.readFileSync(ALPHA_DECAY_CACHE_PATH, "utf-8"));
+    }
   } catch (e) {
-    // Table may not exist yet
+    console.error("[ALPHA DECAY] Failed to read cache file:", (e as any).message);
   }
-  return []; // Empty until factor research pre-computes it
+  return [];
 }
 
-/** Pre-compute alpha decay data via sqlite3 CLI (runs in separate process, doesn't block Node).
- *  Returns a Promise that resolves when complete. */
+/** Pre-compute alpha decay data via sqlite3 CLI and save to JSON file.
+ *  Runs in a separate process to avoid blocking Node.js or locking the DB. */
 export function precomputeAlphaDecay(): Promise<void> {
   const { exec } = require("child_process");
   console.log("[ALPHA DECAY] Pre-computing alpha decay curve via sqlite3 CLI...");
   return new Promise((resolve, reject) => {
-    const sqlScript = `
-CREATE TABLE IF NOT EXISTS alpha_decay_cache (
-  trading_day INTEGER PRIMARY KEY,
-  sample_size INTEGER,
-  avg_excess_pct REAL,
-  avg_return_pct REAL
-);
-DELETE FROM alpha_decay_cache;
-INSERT INTO alpha_decay_cache (trading_day, sample_size, avg_excess_pct, avg_return_pct)
-  SELECT trading_day, 
-    COUNT(*) as sample_size,
-    ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct,
-    ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct
-  FROM daily_forward_returns
-  WHERE excess_from_next_open IS NOT NULL
-  GROUP BY trading_day
-  ORDER BY trading_day;
-SELECT COUNT(*) || ' data points cached' FROM alpha_decay_cache;
-`;
-    exec(`nice -n 19 sqlite3 /opt/insider-signal-dash/data.db "${sqlScript.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
-      { timeout: 600000 },
+    // Use sqlite3 in read-only mode to query and output JSON
+    const cmd = `nice -n 19 sqlite3 -json -readonly /opt/insider-signal-dash/data.db "SELECT trading_day, COUNT(*) as sample_size, ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct FROM daily_forward_returns WHERE excess_from_next_open IS NOT NULL GROUP BY trading_day ORDER BY trading_day" > ${ALPHA_DECAY_CACHE_PATH}`;
+    exec(cmd, { timeout: 600000, shell: "/bin/bash" },
       (error: any, stdout: string, stderr: string) => {
         if (error) {
           console.error("[ALPHA DECAY] Failed:", error.message);
           reject(error);
         } else {
-          console.log(`[ALPHA DECAY] Done: ${stdout.trim()}`);
+          try {
+            const data = JSON.parse(fs.readFileSync(ALPHA_DECAY_CACHE_PATH, "utf-8"));
+            console.log(`[ALPHA DECAY] Done: ${data.length} data points cached to JSON file`);
+          } catch { console.log("[ALPHA DECAY] Done (output saved)"); }
           resolve();
         }
       }
