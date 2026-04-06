@@ -440,7 +440,19 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
 // DATA PIPELINE STATUS
 // ============================================================
 
+// Cache pipeline status for 60s — avoids blocking the event loop with heavy COUNT(*) queries
+let _pipelineStatusCache: any = null;
+let _pipelineStatusCacheTime = 0;
+const PIPELINE_STATUS_CACHE_TTL = 60_000; // 60 seconds
+
 export function getDataPipelineStatus() {
+  const now = Date.now();
+  if (_pipelineStatusCache && (now - _pipelineStatusCacheTime) < PIPELINE_STATUS_CACHE_TTL) {
+    return _pipelineStatusCache;
+  }
+
+  // Use MAX(rowid) for large tables — O(1) index lookup vs O(n) full scan
+  // For dailyForwardReturns (23M+ rows), COUNT(*) takes 10+ seconds and freezes the event loop
   const txCount = db.select({ count: sql<number>`count(*)` })
     .from(insiderTransactions)
     .where(eq(insiderTransactions.transactionType, "P"))
@@ -448,7 +460,11 @@ export function getDataPipelineStatus() {
   
   const signalCount = db.select({ count: sql<number>`count(*)` }).from(purchaseSignals).get();
   const enrichedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
-  const fwdReturnCount = db.select({ count: sql<number>`count(*)` }).from(dailyForwardReturns).get();
+  
+  // Fast approximate count for large tables using MAX(rowid)
+  const fwdReturnApprox = db.all(sql`SELECT MAX(rowid) as count FROM daily_forward_returns`) as any;
+  const fwdReturnCount = fwdReturnApprox?.[0]?.count || 0;
+  
   const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
   const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
   const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
@@ -465,16 +481,18 @@ export function getDataPipelineStatus() {
   const totalAll = signalCount?.count || 0;
   const enriched = enrichedCount?.count || 0;
   
-  return {
+  _pipelineStatusCache = {
     totalPurchases: txCount?.count || 0,
     totalSignals: totalAll,
     enrichedSignals: enriched,
     failedTickers: failedTickerCount,
-    forwardReturnDataPoints: fwdReturnCount?.count || 0,
+    forwardReturnDataPoints: fwdReturnCount,
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
     // Enrichment is complete — show 100% since all processable signals have been handled
     enrichmentProgress: 100,
   };
+  _pipelineStatusCacheTime = now;
+  return _pipelineStatusCache;
 }
