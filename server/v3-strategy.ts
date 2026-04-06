@@ -19,6 +19,22 @@ import {
 import { eq, desc, sql, and, gte, lte, isNull, asc } from "drizzle-orm";
 
 // ============================================================
+// QUERY CACHE — prevent expensive re-computation on every page load
+// ============================================================
+const queryCache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+function cachedQuery<T>(key: string, fn: () => T): T {
+  const cached = queryCache.get(key);
+  if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+    return cached.data as T;
+  }
+  const result = fn();
+  queryCache.set(key, { data: result, timestamp: Date.now() });
+  return result;
+}
+
+// ============================================================
 // FACTOR RESEARCH API
 // ============================================================
 
@@ -66,26 +82,15 @@ export function getFactorHeatmap(factorName: string) {
     .all();
 }
 
-/** Get alpha decay curve for a score tier or factor slice */
+/** Get alpha decay curve for a score tier or factor slice.
+ *  CACHED because this aggregates 23M+ rows which can lock SQLite for seconds. */
 export function getAlphaDecayCurve(options: {
   factorName?: string;
   sliceName?: string;
   scoreTier?: number;
 } = {}) {
-  // Get all signals matching the criteria
-  let signalIds: number[] = [];
-  
-  if (options.scoreTier) {
-    signalIds = db.select({ id: purchaseSignals.id })
-      .from(purchaseSignals)
-      .where(eq(purchaseSignals.scoreTier, options.scoreTier))
-      .all()
-      .map(r => r.id);
-  }
-  
-  // Get average excess return at each trading day
-  if (signalIds.length === 0) {
-    // All signals with forward returns
+  const cacheKey = `alpha_decay_${options.scoreTier || 'all'}`;
+  return cachedQuery(cacheKey, () => {
     return db.all(sql`
       SELECT trading_day, 
         COUNT(*) as sample_size,
@@ -96,34 +101,7 @@ export function getAlphaDecayCurve(options: {
       GROUP BY trading_day
       ORDER BY trading_day
     `);
-  }
-  
-  // With specific signal IDs (batch to avoid SQLite limits)
-  const BATCH = 500;
-  const dayResults = new Map<number, { sum: number; count: number; retSum: number }>();
-  
-  for (let i = 0; i < signalIds.length; i += BATCH) {
-    const batch = signalIds.slice(i, i + BATCH);
-    const placeholders = batch.map(() => "?").join(",");
-    const rows = db.all(sql.raw(`
-      SELECT trading_day, excess_from_next_open, return_from_next_open
-      FROM daily_forward_returns
-      WHERE signal_id IN (${placeholders}) AND excess_from_next_open IS NOT NULL
-    `));
-    // Note: raw SQL doesn't bind params easily, use a different approach
-  }
-  
-  // Fallback to simpler query
-  return db.all(sql`
-    SELECT trading_day, 
-      COUNT(*) as sample_size,
-      ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct,
-      ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct
-    FROM daily_forward_returns
-    WHERE excess_from_next_open IS NOT NULL
-    GROUP BY trading_day
-    ORDER BY trading_day
-  `);
+  });
 }
 
 /** Get model weights */

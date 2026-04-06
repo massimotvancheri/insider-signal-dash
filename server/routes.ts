@@ -158,10 +158,15 @@ export async function registerRoutes(
     res.json(getFactorHeatmap(req.params.factorName));
   });
 
-  /** Alpha decay curve — average excess return at each trading day */
+  /** Alpha decay curve — average excess return at each trading day (cached, heavy query) */
   app.get("/api/factors/alpha-decay", (req, res) => {
-    const scoreTier = req.query.tier ? parseInt(req.query.tier as string) : undefined;
-    res.json(getAlphaDecayCurve({ scoreTier }));
+    try {
+      const scoreTier = req.query.tier ? parseInt(req.query.tier as string) : undefined;
+      res.json(getAlphaDecayCurve({ scoreTier }));
+    } catch (err: any) {
+      console.error("[/api/factors/alpha-decay ERROR]", err.message);
+      res.status(500).json({ error: "Alpha decay computation failed", detail: err.message });
+    }
   });
 
   /** Model weights — data-derived scoring weights */
