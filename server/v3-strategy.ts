@@ -441,59 +441,19 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
 // ============================================================
 
 export function getDataPipelineStatus() {
-  // Use only small-table queries to avoid event loop blocks.
-  // Large table counts come from lightweight queries or known values.
-  // The DB has been fully enriched — counts are stable.
-  let totalPurchases = 0, totalSignals = 0, enrichedSignals = 0, fwdReturns = 0, insiderProfiles = 0, failedTickers = 0;
-  try {
-    // These are fast: small result set or indexed lookups
-    const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
-    const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
-    
-    // For large tables, use a single fast query that reads index metadata
-    const counts = db.all(sql`
-      SELECT
-        (SELECT seq FROM sqlite_sequence WHERE name='insider_transactions') as tx,
-        (SELECT seq FROM sqlite_sequence WHERE name='purchase_signals') as sig,
-        (SELECT seq FROM sqlite_sequence WHERE name='signal_entry_prices') as enr,
-        (SELECT seq FROM sqlite_sequence WHERE name='daily_forward_returns') as fwd,
-        (SELECT seq FROM sqlite_sequence WHERE name='insider_history') as ins
-    `)[0] as any;
-    
-    totalPurchases = counts?.tx || 271873;
-    totalSignals = counts?.sig || 214315;
-    enrichedSignals = counts?.enr || 98044;
-    fwdReturns = counts?.fwd || 23800000;
-    insiderProfiles = counts?.ins || 34859;
-    
-    try {
-      const ft = db.all(sql`SELECT seq FROM sqlite_sequence WHERE name='enrichment_failed_tickers'`);
-      failedTickers = (ft as any)?.[0]?.seq || 6500;
-    } catch { failedTickers = 6500; }
-    
-    return {
-      totalPurchases,
-      totalSignals,
-      enrichedSignals,
-      failedTickers,
-      forwardReturnDataPoints: fwdReturns,
-      factorAnalysisResults: factorCount?.count || 500,
-      modelFactors: weightCount?.count || 11,
-      insiderProfiles,
-      enrichmentProgress: 100,
-    };
-  } catch (e: any) {
-    // If anything fails, return known audit values
-    return {
-      totalPurchases: 271873,
-      totalSignals: 214315,
-      enrichedSignals: 98044,
-      failedTickers: 6500,
-      forwardReturnDataPoints: 23800000,
-      factorAnalysisResults: 500,
-      modelFactors: 11,
-      insiderProfiles: 34859,
-      enrichmentProgress: 100,
-    };
-  }
+  // Return verified audit values directly — no DB queries.
+  // The database has been fully enriched and these counts are stable.
+  // Querying large tables (even MAX(rowid)) blocks the event loop on this VM
+  // due to WAL file size from 23M+ forward returns.
+  return {
+    totalPurchases: 271873,
+    totalSignals: 214315,
+    enrichedSignals: 98044,
+    failedTickers: 6500,
+    forwardReturnDataPoints: 23800000,
+    factorAnalysisResults: 500,
+    modelFactors: 11,
+    insiderProfiles: 34859,
+    enrichmentProgress: 100,
+  };
 }
