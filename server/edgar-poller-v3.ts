@@ -440,8 +440,8 @@ export function startV3Polling(): void {
   pollingActive = true;
   
   console.log("[V3 POLLER] Starting dual-mode EDGAR poller");
-  console.log("[V3 POLLER] EFTS: 1s during active hours, 30s off-hours");
-  console.log("[V3 POLLER] Prediction: 0.5s during active hours (top 20 agents = 64% coverage)");
+  console.log("[V3 POLLER] EFTS: 60s during active hours, 5min off-hours");
+  console.log("[V3 POLLER] Prediction: 30s during active hours (top 20 agents = 64% coverage)");
   
   // Load seen accessions from DB to avoid reprocessing
   const recent = db.select({ accn: insiderTransactions.accessionNumber })
@@ -472,7 +472,7 @@ export function startV3Polling(): void {
   
   // EFTS polling loop
   const runEfts = async () => {
-    const interval = isActiveHours() ? 1000 : 30000;
+    const interval = isActiveHours() ? 60000 : 300000; // 60s active, 5min off-hours
     
     try {
       const newAccessions = await pollEfts();
@@ -498,7 +498,7 @@ export function startV3Polling(): void {
       }
     } catch {}
     
-    predictionIntervalId = setTimeout(runPrediction, 500);
+    predictionIntervalId = setTimeout(runPrediction, 30000); // 30s instead of 0.5s
   };
   
   // Start both loops
