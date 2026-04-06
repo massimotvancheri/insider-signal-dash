@@ -448,7 +448,8 @@ export function getDataPipelineStatus() {
   
   const signalCount = db.select({ count: sql<number>`count(*)` }).from(purchaseSignals).get();
   const enrichedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
-  const fwdReturnCount = db.select({ count: sql<number>`count(*)` }).from(dailyForwardReturns).get();
+  // Use MAX(rowid) instead of COUNT(*) — instant O(1) lookup vs. scanning 23M+ rows
+  const fwdReturnCount = db.all(sql`SELECT MAX(rowid) as count FROM daily_forward_returns`)[0] as any;
   const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
   const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
   const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
