@@ -17,72 +17,13 @@ import {
   runSignalTradeMatching, getEnhancedMissedSignals,
 } from "./trade-engine";
 
-// ============================================================
-// In-memory response cache to prevent concurrent DB overload
-// better-sqlite3 is synchronous and blocks the event loop.
-// When the SPA loads, it fires 6+ API calls at once, each blocking
-// the event loop with heavy SQLite queries. This cache ensures
-// only the first request hits the DB; subsequent requests within
-// the TTL window get instant responses from memory.
-// ============================================================
-const responseCache = new Map<string, { data: any; expiry: number }>();
-
-function cached<T>(key: string, ttlMs: number, fn: () => T): T {
-  const now = Date.now();
-  const entry = responseCache.get(key);
-  if (entry && entry.expiry > now) {
-    return entry.data as T;
-  }
-  const data = fn();
-  responseCache.set(key, { data, expiry: now + ttlMs });
-  return data;
-}
-
-// Cache TTL
-const CACHE_TTL = 30_000;  // 30 seconds
-
-// Async-safe cached wrapper for promises
-async function cachedAsync<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const now = Date.now();
-  const entry = responseCache.get(key);
-  if (entry && entry.expiry > now) {
-    return entry.data as T;
-  }
-  const data = await fn();
-  responseCache.set(key, { data, expiry: now + CACHE_TTL });
-  return data;
-}
-
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
 
-  // Response cache middleware for all GET /api/* routes
-  // Prevents concurrent DB overload when SPA fires 6+ API calls at once
-  app.use("/api", (req, res, next) => {
-    if (req.method !== "GET") return next();
-    // Skip admin, ping, and schwab auth endpoints (these should always be fresh)
-    if (req.path.startsWith("/admin") || req.path === "/ping" || req.path.startsWith("/schwab/callback")) return next();
-
-    const key = req.originalUrl;
-    const now = Date.now();
-    const entry = responseCache.get(key);
-    if (entry && entry.expiry > now) {
-      return res.json(entry.data);
-    }
-
-    // Monkey-patch res.json to cache the response automatically
-    const origJson = res.json.bind(res);
-    (res as any).json = function(data: any) {
-      responseCache.set(key, { data, expiry: now + CACHE_TTL });
-      return origJson(data);
-    };
-    next();
-  });
-
-  // EDGAR poller temporarily disabled for maintenance screenshots
-  // startV3Polling();
+  // Start the V3 dual-mode EDGAR polling engine
+  startV3Polling();
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
@@ -1143,74 +1084,6 @@ chmod +x /opt/deploy.sh`,
   // Alpha decay pre-computation is too heavy for this VM (23M rows).
   // Run manually via POST /api/admin/precompute-alpha-decay when needed.
   // The API endpoint returns [] if the cache file doesn't exist yet.
-
-  // Admin: warm the response cache by sequentially hitting all heavy endpoints
-  // Call this after startup to ensure the cache is populated before any browser loads
-  app.post("/api/admin/warm-cache", async (req, res) => {
-    const secret = req.headers["x-deploy-secret"] || req.query.secret;
-    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    const warmed: string[] = [];
-    const errors: string[] = [];
-    const warmEndpoint = async (name: string, fn: () => any) => {
-      try {
-        const key = `/api/${name}`;
-        const result = fn();
-        const data = result instanceof Promise ? await result : result;
-        responseCache.set(key, { data, expiry: Date.now() + CACHE_TTL });
-        warmed.push(name);
-      } catch (e: any) {
-        errors.push(`${name}: ${e.message}`);
-      }
-    };
-    // Warm each endpoint sequentially to avoid concurrent DB load
-    await warmEndpoint("dashboard", () => {
-      const purchaseCount30d = storage.getPurchaseCount(36500);
-      const volume30d = storage.getRecentPurchaseVolume(36500);
-      const clusters = storage.getClusterBuys(36500);
-      return { kpis: { purchaseCount30d, purchaseCount7d: 0, purchaseCount1d: 0, volume30d, volume7d: 0, totalTransactions: storage.getTransactionCount(), clusterCount: clusters.length }, pollingStatus: getV3PollingStatus() };
-    });
-    await warmEndpoint("signals", () => getScoredSignals(50));
-    await warmEndpoint("factors/effectiveness", () => getFactorEffectiveness());
-    await warmEndpoint("factors/model-weights", () => getModelWeights());
-    await warmEndpoint("portfolio/closed-trades", () => storage.getClosedTrades(100));
-    await warmEndpoint("execution/summary", () => getExecutionSummary());
-    await warmEndpoint("execution/deviations", () => getTradeDeviations(100));
-    await warmEndpoint("performance/equity-curve", () => getEquityCurve());
-    try {
-      const positions = await getPortfolioWithSignalHealth(getSchwabAccessToken);
-      const totalValue = positions.reduce((s: number, p: any) => s + (p.marketValue || 0), 0);
-      const totalPnl = positions.reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
-      const totalCost = positions.reduce((s: number, p: any) => s + (p.avgCostBasis * p.quantity), 0);
-      const totalDayChange = positions.reduce((s: number, p: any) => s + (p.dayChange || 0), 0);
-      const posData = { positions, summary: { totalValue, totalCost, totalPnl, totalPnlPct: totalCost > 0 ? (totalPnl / totalCost) * 100 : 0, totalDayChange, totalDayChangePct: totalValue > 0 ? (totalDayChange / totalValue) * 100 : 0, positionCount: positions.length, signalAlignedCount: positions.filter((p: any) => p.signalClassification === 'signal_aligned').length, independentCount: positions.filter((p: any) => p.signalClassification !== 'signal_aligned').length } };
-      responseCache.set('/api/portfolio/positions', { data: posData, expiry: Date.now() + CACHE_TTL });
-      warmed.push('portfolio/positions');
-    } catch (e: any) { errors.push(`portfolio/positions: ${e.message}`); }
-    try {
-      const analytics = getPerformanceAnalytics();
-      if (analytics) {
-        responseCache.set('/api/performance/summary', { data: analytics, expiry: Date.now() + CACHE_TTL });
-        warmed.push('performance/summary');
-      }
-    } catch (e: any) { errors.push(`performance/summary: ${e.message}`); }
-    console.log(`[CACHE] Warmed ${warmed.length} endpoints:`, warmed.join(', '));
-    if (errors.length > 0) console.error('[CACHE] Errors:', errors);
-    res.json({ warmed, errors, cacheSize: responseCache.size });
-  });
-
-  // Admin: clear response cache
-  app.post("/api/admin/clear-cache", (req, res) => {
-    const secret = req.headers["x-deploy-secret"] || req.query.secret;
-    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    const size = responseCache.size;
-    responseCache.clear();
-    console.log(`[CACHE] Cleared ${size} entries`);
-    res.json({ cleared: size });
-  });
 
   return httpServer;
 }
