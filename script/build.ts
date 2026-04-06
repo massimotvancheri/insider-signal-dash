@@ -65,6 +65,21 @@ async function buildAll() {
       external: externals,
       logLevel: "info",
     });
+
+    console.log("building poller...");
+    await esbuild({
+      entryPoints: ["server/poller.ts"],
+      platform: "node",
+      bundle: true,
+      format: "cjs",
+      outfile: "dist/poller.cjs",
+      define: {
+        "process.env.NODE_ENV": '"production"',
+      },
+      minify: true,
+      external: externals,
+      logLevel: "info",
+    });
   } catch (err) {
     // Build failed — restore backup if available
     if (hasExistingDist) {

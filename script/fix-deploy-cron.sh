@@ -7,3 +7,10 @@ if [ -f "$DEPLOY_SCRIPT" ] && grep -q "npm run build" "$DEPLOY_SCRIPT"; then
   sed -i 's/npm run build/echo "skipping build (dist pre-built in git)"/' "$DEPLOY_SCRIPT"
   echo "Fixed."
 fi
+
+# Ensure deploy also restarts the poller service
+if [ -f "$DEPLOY_SCRIPT" ] && ! grep -q "insider-signal-poller" "$DEPLOY_SCRIPT"; then
+  echo "Adding poller restart to deploy script..."
+  sed -i 's/systemctl restart insider-signal$/systemctl restart insider-signal\nsystemctl restart insider-signal-poller/' "$DEPLOY_SCRIPT"
+  echo "Added poller restart."
+fi

@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
-import { startV3Polling, getV3PollingStatus } from "./edgar-poller-v3";
+import { readFileSync } from "fs";
 import {
   getFactorResults, getFactorEffectiveness, getFactorHeatmap,
   getAlphaDecayCurve, getModelWeights, getScoredSignals,
@@ -17,13 +17,22 @@ import {
   runSignalTradeMatching, getEnhancedMissedSignals,
 } from "./trade-engine";
 
+/** Read poller status from the file written by the standalone poller process */
+function getPollerStatus(): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync("/tmp/poller-status.json", "utf-8"));
+  } catch {
+    return { active: false, mode: "separate process (status file not found)" };
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
 
-  // Start the V3 dual-mode EDGAR polling engine
-  startV3Polling();
+  // Poller runs as a separate process (server/poller.ts / dist/poller.cjs)
+  // Status is read from /tmp/poller-status.json written by the poller process
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
@@ -55,7 +64,7 @@ export async function registerRoutes(
     let volume7d = storage.getRecentPurchaseVolume(7);
     const totalTransactions = storage.getTransactionCount();
     let clusters = storage.getClusterBuys(30);
-    const pollingStatus = getV3PollingStatus();
+    const pollingStatus = getPollerStatus();
 
     // If no recent data, show last 90 days of historical data
     if (purchaseCount30d === 0) {
@@ -689,7 +698,7 @@ export async function registerRoutes(
 
   /** Polling status */
   app.get("/api/status", (_req, res) => {
-    res.json(getV3PollingStatus());
+    res.json(getPollerStatus());
   });
 
   // ============================================================

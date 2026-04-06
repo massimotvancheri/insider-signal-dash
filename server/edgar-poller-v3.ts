@@ -21,10 +21,11 @@
  * Off hours: 1 req/30s
  */
 
-import { db } from "./db";
 import { insiderTransactions, purchaseSignals } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
 import type { InsertTransaction } from "@shared/schema";
+import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { writeFileSync } from "fs";
 
 const SEC_USER_AGENT = "InsiderSignalDash research@insidersignal.app";
 const EFTS_URL = "https://efts.sec.gov/LATEST/search-index?forms=4&dateRange=custom";
@@ -55,6 +56,9 @@ const TOP_FILING_AGENTS = [
 
 // C-Suite keywords for quick scoring
 const C_SUITE_KEYWORDS = ["CEO", "CFO", "COO", "CTO", "CIO", "Chief", "President", "Chairman"];
+
+// Injected database reference (set by startV3Polling)
+let _db: BetterSQLite3Database | null = null;
 
 // State tracking
 let seenAccessions = new Set<string>();
@@ -184,20 +188,20 @@ async function pollPredictions(): Promise<string[]> {
   let lastSeq = agentSequences.get(agent.cik);
   if (!lastSeq) {
     // Initialize from database
-    const latest = db.select({ accn: insiderTransactions.accessionNumber })
+    const latest = _db!.select({ accn: insiderTransactions.accessionNumber })
       .from(insiderTransactions)
       .where(sql`accession_number LIKE ${agent.cik + '%'}`)
       .orderBy(sql`accession_number DESC`)
       .limit(1)
       .get();
-    
+
     if (latest) {
       const parsed = parseAccessionNumber(latest.accn);
       if (parsed) {
         lastSeq = parsed.seq;
       }
     }
-    
+
     if (!lastSeq) lastSeq = 0;
     agentSequences.set(agent.cik, lastSeq);
   }
@@ -276,7 +280,7 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     // Insert into database
     for (const tx of purchases) {
       try {
-        db.insert(insiderTransactions).values({
+        _db!.insert(insiderTransactions).values({
           ...tx,
           createdAt: new Date().toISOString(),
         }).run();
@@ -435,25 +439,26 @@ function isActiveHours(): boolean {
 // MAIN POLLING LOOP
 // ============================================================
 
-export function startV3Polling(): void {
+export function startV3Polling(db: BetterSQLite3Database): void {
   if (pollingActive) return;
+  _db = db;
   pollingActive = true;
-  
+
   console.log("[V3 POLLER] Starting dual-mode EDGAR poller");
-  console.log("[V3 POLLER] EFTS: 60s during active hours, 5min off-hours");
-  console.log("[V3 POLLER] Prediction: 30s during active hours (top 20 agents = 64% coverage)");
-  
+  console.log("[V3 POLLER] EFTS: 1s during active hours, 30s off-hours");
+  console.log("[V3 POLLER] Prediction: 0.5s during active hours (top 20 agents = 64% coverage)");
+
   // Load seen accessions from DB to avoid reprocessing
   const recent = db.select({ accn: insiderTransactions.accessionNumber })
     .from(insiderTransactions)
     .where(sql`filing_date >= date('now', '-7 days')`)
     .all();
-  
+
   for (const r of recent) {
     seenAccessions.add(r.accn);
   }
   console.log(`[V3 POLLER] Loaded ${seenAccessions.size} recent accessions for deduplication`);
-  
+
   // Initialize agent sequences
   for (const agent of TOP_FILING_AGENTS) {
     const latest = db.select({ accn: insiderTransactions.accessionNumber })
@@ -462,45 +467,54 @@ export function startV3Polling(): void {
       .orderBy(sql`accession_number DESC`)
       .limit(1)
       .get();
-    
+
     if (latest) {
       const parsed = parseAccessionNumber(latest.accn);
       if (parsed) agentSequences.set(agent.cik, parsed.seq);
     }
   }
   console.log(`[V3 POLLER] Initialized ${agentSequences.size} agent accession sequences\n`);
-  
+
+  // Write status file every 30 seconds
+  const writeStatus = () => {
+    try {
+      writeFileSync("/tmp/poller-status.json", JSON.stringify(getV3PollingStatus()));
+    } catch {}
+  };
+  writeStatus();
+  setInterval(writeStatus, 30000);
+
   // EFTS polling loop
   const runEfts = async () => {
-    const interval = isActiveHours() ? 60000 : 300000; // 60s active, 5min off-hours
-    
+    const interval = isActiveHours() ? 1000 : 30000; // 1s active, 30s off-hours
+
     try {
       const newAccessions = await pollEfts();
       for (const accn of newAccessions) {
         await processNewFiling(accn, "efts");
       }
     } catch {}
-    
+
     eftsIntervalId = setTimeout(runEfts, interval);
   };
-  
+
   // Prediction polling loop
   const runPrediction = async () => {
     if (!isActiveHours()) {
       predictionIntervalId = setTimeout(runPrediction, 60000);
       return;
     }
-    
+
     try {
       const newAccessions = await pollPredictions();
       for (const accn of newAccessions) {
         await processNewFiling(accn, "prediction");
       }
     } catch {}
-    
-    predictionIntervalId = setTimeout(runPrediction, 30000); // 30s instead of 0.5s
+
+    predictionIntervalId = setTimeout(runPrediction, 500); // 0.5s during active hours
   };
-  
+
   // Start both loops
   runEfts();
   setTimeout(runPrediction, 250); // Offset by 250ms to stagger requests
@@ -523,6 +537,7 @@ export function getV3PollingStatus() {
     marketState: getMarketState(),
     agentsCovered: TOP_FILING_AGENTS.length,
     coveragePct: 64,
+    process: "standalone",
     stats: {
       ...stats,
       seenAccessions: seenAccessions.size,
