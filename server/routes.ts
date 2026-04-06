@@ -81,8 +81,8 @@ export async function registerRoutes(
     next();
   });
 
-  // Start the V3 dual-mode EDGAR polling engine
-  startV3Polling();
+  // EDGAR poller temporarily disabled for maintenance screenshots
+  // startV3Polling();
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
