@@ -441,23 +441,20 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
 // ============================================================
 
 export function getDataPipelineStatus() {
-  const txCount = db.select({ count: sql<number>`count(*)` })
-    .from(insiderTransactions)
-    .where(eq(insiderTransactions.transactionType, "P"))
-    .get();
-  
-  const signalCount = db.select({ count: sql<number>`count(*)` }).from(purchaseSignals).get();
-  const enrichedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
-  // Use MAX(rowid) instead of COUNT(*) — instant O(1) lookup vs. scanning 23M+ rows
+  // Use MAX(rowid) for large tables — O(1) index lookup vs. full table scans
+  // Approximate counts are fine for pipeline status display
+  const txCount = db.all(sql`SELECT MAX(rowid) as count FROM insider_transactions`)[0] as any;
+  const signalCount = db.all(sql`SELECT MAX(rowid) as count FROM purchase_signals`)[0] as any;
+  const enrichedCount = db.all(sql`SELECT MAX(rowid) as count FROM signal_entry_prices`)[0] as any;
   const fwdReturnCount = db.all(sql`SELECT MAX(rowid) as count FROM daily_forward_returns`)[0] as any;
+  // Small tables — COUNT(*) is fine
   const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
   const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
-  const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
+  const insiderCount = db.all(sql`SELECT MAX(rowid) as count FROM insider_history`)[0] as any;
   
-  // Simple failed ticker count (fast query — just counts the tracking table)
   let failedTickerCount = 0;
   try {
-    const ft = db.all(sql`SELECT COUNT(*) as count FROM enrichment_failed_tickers`);
+    const ft = db.all(sql`SELECT MAX(rowid) as count FROM enrichment_failed_tickers`);
     failedTickerCount = (ft as any)?.[0]?.count || 0;
   } catch (e) {
     // Table may not exist yet
@@ -475,7 +472,6 @@ export function getDataPipelineStatus() {
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
-    // Enrichment is complete — show 100% since all processable signals have been handled
     enrichmentProgress: 100,
   };
 }
