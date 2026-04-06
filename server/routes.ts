@@ -914,10 +914,9 @@ export async function registerRoutes(
         if (error) console.error("[FACTOR-RESEARCH] Failed:", error.message);
         if (stdout) console.log("[FACTOR-RESEARCH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[FACTOR-RESEARCH] stderr:", stderr.slice(-500));
-        // After factor research completes, pre-compute alpha decay cache
-        try { precomputeAlphaDecay(); } catch (e: any) {
-          console.error("[FACTOR-RESEARCH] Alpha decay precompute failed:", e.message);
-        }
+        // Alpha decay pre-computation disabled — crashes server with 36M+ rows
+        // Run separately via POST /api/admin/precompute-alpha-decay if needed
+        console.log("[FACTOR-RESEARCH] Complete. Alpha decay skipped (run separately if needed).");
       }
     );
     res.json({ status: "factor_research_started" });
