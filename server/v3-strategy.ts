@@ -82,16 +82,35 @@ export function getFactorHeatmap(factorName: string) {
     .all();
 }
 
-/** Get alpha decay curve for a score tier or factor slice.
- *  CACHED because this aggregates 23M+ rows which can lock SQLite for seconds. */
+/** Get alpha decay curve — reads from pre-computed cache table.
+ *  The actual aggregation (23M+ rows) is done during factor research, not on demand. */
 export function getAlphaDecayCurve(options: {
   factorName?: string;
   sliceName?: string;
   scoreTier?: number;
 } = {}) {
-  const cacheKey = `alpha_decay_${options.scoreTier || 'all'}`;
-  return cachedQuery(cacheKey, () => {
-    return db.all(sql`
+  try {
+    const rows = db.all(sql`SELECT * FROM alpha_decay_cache ORDER BY trading_day`);
+    if (rows && (rows as any[]).length > 0) return rows;
+  } catch (e) {
+    // Table may not exist yet
+  }
+  return []; // Empty until factor research pre-computes it
+}
+
+/** Pre-compute alpha decay data and store in cache table.
+ *  Called during factor research — NOT during normal page loads. */
+export function precomputeAlphaDecay() {
+  console.log("[ALPHA DECAY] Pre-computing alpha decay curve...");
+  try {
+    db.run(sql`CREATE TABLE IF NOT EXISTS alpha_decay_cache (
+      trading_day INTEGER PRIMARY KEY,
+      sample_size INTEGER,
+      avg_excess_pct REAL,
+      avg_return_pct REAL
+    )`);
+    db.run(sql`DELETE FROM alpha_decay_cache`);
+    db.run(sql`INSERT INTO alpha_decay_cache (trading_day, sample_size, avg_excess_pct, avg_return_pct)
       SELECT trading_day, 
         COUNT(*) as sample_size,
         ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct,
@@ -101,7 +120,11 @@ export function getAlphaDecayCurve(options: {
       GROUP BY trading_day
       ORDER BY trading_day
     `);
-  });
+    const count = db.all(sql`SELECT COUNT(*) as n FROM alpha_decay_cache`);
+    console.log(`[ALPHA DECAY] Pre-computed ${(count as any)?.[0]?.n || 0} data points`);
+  } catch (e: any) {
+    console.error("[ALPHA DECAY] Pre-computation failed:", e.message);
+  }
 }
 
 /** Get model weights */

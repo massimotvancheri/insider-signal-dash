@@ -10,6 +10,7 @@ import {
   getPerformanceSnapshots, getPerformanceSummary,
   getExecutionSummary, getTradeDeviations, getMissedSignals,
   getPortfolioWithSignalHealth, getDataPipelineStatus,
+  precomputeAlphaDecay,
 } from "./v3-strategy";
 import {
   runFifoMatching, getPerformanceAnalytics, getEquityCurve,
@@ -894,9 +895,27 @@ export async function registerRoutes(
         if (error) console.error("[FACTOR-RESEARCH] Failed:", error.message);
         if (stdout) console.log("[FACTOR-RESEARCH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[FACTOR-RESEARCH] stderr:", stderr.slice(-500));
+        // After factor research completes, pre-compute alpha decay cache
+        try { precomputeAlphaDecay(); } catch (e: any) {
+          console.error("[FACTOR-RESEARCH] Alpha decay precompute failed:", e.message);
+        }
       }
     );
     res.json({ status: "factor_research_started" });
+  });
+
+  // Admin: pre-compute alpha decay cache (heavy 23M row query, run once)
+  app.post("/api/admin/precompute-alpha-decay", (req, res) => {
+    const secret = req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    try {
+      precomputeAlphaDecay();
+      res.json({ status: "ok", message: "Alpha decay cache pre-computed" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Admin: backup database to GCS
