@@ -445,6 +445,11 @@ let _pipelineStatusCache: any = null;
 let _pipelineStatusCacheTime = 0;
 const PIPELINE_STATUS_CACHE_TTL = 60_000; // 60 seconds
 
+export function invalidatePipelineStatusCache() {
+  _pipelineStatusCache = null;
+  _pipelineStatusCacheTime = 0;
+}
+
 export function getDataPipelineStatus() {
   const now = Date.now();
   if (_pipelineStatusCache && (now - _pipelineStatusCacheTime) < PIPELINE_STATUS_CACHE_TTL) {
@@ -490,8 +495,7 @@ export function getDataPipelineStatus() {
     factorAnalysisResults: factorCount?.count || 0,
     modelFactors: weightCount?.count || 0,
     insiderProfiles: insiderCount?.count || 0,
-    // Enrichment is complete — show 100% since all processable signals have been handled
-    enrichmentProgress: 100,
+    enrichmentProgress: totalAll > 0 ? Math.round((enriched / totalAll) * 100) : 0,
   };
   _pipelineStatusCacheTime = now;
   return _pipelineStatusCache;

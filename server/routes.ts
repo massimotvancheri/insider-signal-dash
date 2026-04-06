@@ -9,7 +9,7 @@ import {
   getAlphaDecayCurve, getModelWeights, getScoredSignals,
   getPerformanceSnapshots, getPerformanceSummary,
   getExecutionSummary, getTradeDeviations, getMissedSignals,
-  getPortfolioWithSignalHealth, getDataPipelineStatus,
+  getPortfolioWithSignalHealth, getDataPipelineStatus, invalidatePipelineStatusCache,
   precomputeAlphaDecay,
 } from "./v3-strategy";
 import {
@@ -782,6 +782,8 @@ export async function registerRoutes(
   let enrichmentRunning = false;
   let enrichmentContinuous = false;
 
+  let lastEnrichedCount = 0;
+
   function runEnrichmentBatch() {
     const { exec } = require("child_process");
     enrichmentRunning = true;
@@ -795,14 +797,22 @@ export async function registerRoutes(
 
         // If continuous mode is on, schedule next batch (retry even on error)
         if (enrichmentContinuous) {
-          // Check if all signals are enriched
+          // Invalidate pipeline status cache to get fresh counts after enrichment
+          invalidatePipelineStatusCache();
           const status = getDataPipelineStatus();
-          if (status.enrichmentProgress >= 100) {
-            console.log(`[ENRICH] Enrichment complete: ${status.enrichedSignals} enriched. Stopping continuous mode.`);
+          const currentEnriched = status.enrichedSignals || 0;
+
+          // Stop if script found 0 signals to enrich, or no progress since last batch
+          const noSignals = stdout && stdout.includes("0 signals to enrich");
+          const noProgress = currentEnriched === lastEnrichedCount && lastEnrichedCount > 0;
+
+          if (noSignals || (noProgress && !error)) {
+            console.log(`[ENRICH] No more enrichable signals (${currentEnriched} total enriched, ${status.enrichmentProgress}%). Stopping continuous mode.`);
             enrichmentContinuous = false;
           } else {
+            lastEnrichedCount = currentEnriched;
             const delay = error ? 30000 : 5000; // 30s retry on error, 5s on success
-            console.log(`[ENRICH] Continuous mode: ${status.enrichmentProgress}% done. Next batch in ${delay/1000}s...${error ? ' (retrying after error)' : ''}`);
+            console.log(`[ENRICH] Continuous mode: ${status.enrichmentProgress}% (${currentEnriched}/${status.totalSignals}). Next batch in ${delay/1000}s...${error ? ' (retrying after error)' : ''}`);
             setTimeout(runEnrichmentBatch, delay);
           }
         }
