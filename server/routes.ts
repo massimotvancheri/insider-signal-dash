@@ -23,7 +23,7 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   // Start the V3 dual-mode EDGAR polling engine
-  startV3Polling();
+  // startV3Polling(); // Temporarily disabled for screenshots
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
