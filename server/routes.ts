@@ -788,7 +788,7 @@ export async function registerRoutes(
     const { exec } = require("child_process");
     enrichmentRunning = true;
     console.log("[ENRICH] Starting batch...");
-    exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2016", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
+    exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2010", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
       (error: any, stdout: string, stderr: string) => {
         enrichmentRunning = false;
         if (error) console.error("[ENRICH] Batch failed:", error.message);
