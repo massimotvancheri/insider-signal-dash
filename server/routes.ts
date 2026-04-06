@@ -1081,5 +1081,16 @@ chmod +x /opt/deploy.sh`,
     res.json({ ok: true, uptime: process.uptime(), lag: Date.now() - lastHeartbeat });
   });
 
+  // Auto-precompute alpha decay 30s after startup (if cache file doesn't exist)
+  setTimeout(() => {
+    const fs = require("fs");
+    if (!fs.existsSync("/opt/insider-signal-dash/alpha-decay-cache.json")) {
+      console.log("[STARTUP] Alpha decay cache missing, pre-computing in background...");
+      precomputeAlphaDecay().catch((e: any) => console.error("[STARTUP] Alpha decay failed:", e.message));
+    } else {
+      console.log("[STARTUP] Alpha decay cache exists, skipping pre-computation");
+    }
+  }, 30000);
+
   return httpServer;
 }
