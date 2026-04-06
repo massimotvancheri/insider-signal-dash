@@ -98,33 +98,44 @@ export function getAlphaDecayCurve(options: {
   return []; // Empty until factor research pre-computes it
 }
 
-/** Pre-compute alpha decay data and store in cache table.
- *  Called during factor research — NOT during normal page loads. */
-export function precomputeAlphaDecay() {
-  console.log("[ALPHA DECAY] Pre-computing alpha decay curve...");
-  try {
-    db.run(sql`CREATE TABLE IF NOT EXISTS alpha_decay_cache (
-      trading_day INTEGER PRIMARY KEY,
-      sample_size INTEGER,
-      avg_excess_pct REAL,
-      avg_return_pct REAL
-    )`);
-    db.run(sql`DELETE FROM alpha_decay_cache`);
-    db.run(sql`INSERT INTO alpha_decay_cache (trading_day, sample_size, avg_excess_pct, avg_return_pct)
-      SELECT trading_day, 
-        COUNT(*) as sample_size,
-        ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct,
-        ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct
-      FROM daily_forward_returns
-      WHERE excess_from_next_open IS NOT NULL
-      GROUP BY trading_day
-      ORDER BY trading_day
-    `);
-    const count = db.all(sql`SELECT COUNT(*) as n FROM alpha_decay_cache`);
-    console.log(`[ALPHA DECAY] Pre-computed ${(count as any)?.[0]?.n || 0} data points`);
-  } catch (e: any) {
-    console.error("[ALPHA DECAY] Pre-computation failed:", e.message);
-  }
+/** Pre-compute alpha decay data via sqlite3 CLI (runs in separate process, doesn't block Node).
+ *  Returns a Promise that resolves when complete. */
+export function precomputeAlphaDecay(): Promise<void> {
+  const { exec } = require("child_process");
+  console.log("[ALPHA DECAY] Pre-computing alpha decay curve via sqlite3 CLI...");
+  return new Promise((resolve, reject) => {
+    const sqlScript = `
+CREATE TABLE IF NOT EXISTS alpha_decay_cache (
+  trading_day INTEGER PRIMARY KEY,
+  sample_size INTEGER,
+  avg_excess_pct REAL,
+  avg_return_pct REAL
+);
+DELETE FROM alpha_decay_cache;
+INSERT INTO alpha_decay_cache (trading_day, sample_size, avg_excess_pct, avg_return_pct)
+  SELECT trading_day, 
+    COUNT(*) as sample_size,
+    ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct,
+    ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct
+  FROM daily_forward_returns
+  WHERE excess_from_next_open IS NOT NULL
+  GROUP BY trading_day
+  ORDER BY trading_day;
+SELECT COUNT(*) || ' data points cached' FROM alpha_decay_cache;
+`;
+    exec(`nice -n 19 sqlite3 /opt/insider-signal-dash/data.db "${sqlScript.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
+      { timeout: 600000 },
+      (error: any, stdout: string, stderr: string) => {
+        if (error) {
+          console.error("[ALPHA DECAY] Failed:", error.message);
+          reject(error);
+        } else {
+          console.log(`[ALPHA DECAY] Done: ${stdout.trim()}`);
+          resolve();
+        }
+      }
+    );
+  });
 }
 
 /** Get model weights */

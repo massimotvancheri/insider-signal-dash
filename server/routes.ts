@@ -904,18 +904,15 @@ export async function registerRoutes(
     res.json({ status: "factor_research_started" });
   });
 
-  // Admin: pre-compute alpha decay cache (heavy 23M row query, run once)
-  app.post("/api/admin/precompute-alpha-decay", (req, res) => {
+  // Admin: pre-compute alpha decay cache (heavy 23M row query, runs in background sqlite3 process)
+  app.post("/api/admin/precompute-alpha-decay", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
-    try {
-      precomputeAlphaDecay();
-      res.json({ status: "ok", message: "Alpha decay cache pre-computed" });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+    // Start in background and respond immediately
+    precomputeAlphaDecay().catch((e: any) => console.error("[ADMIN] Alpha decay failed:", e.message));
+    res.json({ status: "started", message: "Alpha decay pre-computation running in background" });
   });
 
   // Admin: backup database to GCS
