@@ -82,7 +82,7 @@ export function getFactorHeatmap(factorName: string) {
     .all();
 }
 
-const ALPHA_DECAY_CACHE_PATH = "/opt/insider-signal-dash/alpha-decay-cache.json";
+export const ALPHA_DECAY_CACHE_PATH = "/opt/insider-signal-dash/alpha-decay-cache.json";
 const fs = require("fs");
 
 /** Get alpha decay curve — reads from pre-computed JSON file.
@@ -102,25 +102,43 @@ export function getAlphaDecayCurve(options: {
   return [];
 }
 
-/** Pre-compute alpha decay data via sqlite3 CLI and save to JSON file.
+/** Pre-compute alpha decay data via sqlite3 CLI (CSV mode) and save to JSON file.
+ *  Uses CSV output to avoid OOM from sqlite3 -json on 36M+ rows.
  *  Runs in a separate process to avoid blocking Node.js or locking the DB. */
 export function precomputeAlphaDecay(): Promise<void> {
   const { exec } = require("child_process");
   console.log("[ALPHA DECAY] Pre-computing alpha decay curve via sqlite3 CLI...");
   return new Promise((resolve, reject) => {
-    // Use sqlite3 in read-only mode to query and output JSON
-    const cmd = `nice -n 19 sqlite3 -json -readonly /opt/insider-signal-dash/data.db "SELECT trading_day, COUNT(*) as sample_size, ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct FROM daily_forward_returns WHERE excess_from_next_open IS NOT NULL GROUP BY trading_day ORDER BY trading_day" > ${ALPHA_DECAY_CACHE_PATH}`;
-    exec(cmd, { timeout: 600000, shell: "/bin/bash" },
+    const sql = `SELECT trading_day, COUNT(*) as sample_size, ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct FROM daily_forward_returns WHERE excess_from_next_open IS NOT NULL GROUP BY trading_day ORDER BY trading_day`;
+    const cmd = `nice -n 19 sqlite3 -csv -header -readonly /opt/insider-signal-dash/data.db "${sql}"`;
+    exec(cmd, { timeout: 600000, maxBuffer: 50 * 1024 * 1024, shell: "/bin/bash" },
       (error: any, stdout: string, stderr: string) => {
         if (error) {
           console.error("[ALPHA DECAY] Failed:", error.message);
-          reject(error);
-        } else {
-          try {
-            const data = JSON.parse(fs.readFileSync(ALPHA_DECAY_CACHE_PATH, "utf-8"));
-            console.log(`[ALPHA DECAY] Done: ${data.length} data points cached to JSON file`);
-          } catch { console.log("[ALPHA DECAY] Done (output saved)"); }
+          return reject(error);
+        }
+        try {
+          const lines = stdout.trim().split("\n");
+          if (lines.length < 2) {
+            fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify([]));
+            console.log("[ALPHA DECAY] Done: 0 data points (no results)");
+            return resolve();
+          }
+          const headers = lines[0].split(",");
+          const data = lines.slice(1).map(line => {
+            const vals = line.split(",");
+            const obj: any = {};
+            headers.forEach((h, i) => {
+              obj[h] = isNaN(Number(vals[i])) ? vals[i] : Number(vals[i]);
+            });
+            return obj;
+          });
+          fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify(data));
+          console.log(`[ALPHA DECAY] Done: ${data.length} data points cached`);
           resolve();
+        } catch (parseErr: any) {
+          console.error("[ALPHA DECAY] CSV parse failed:", parseErr.message);
+          reject(parseErr);
         }
       }
     );

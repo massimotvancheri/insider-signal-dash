@@ -3,14 +3,14 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
-import { readFileSync } from "fs";
+import fs, { readFileSync } from "fs";
 import {
   getFactorResults, getFactorEffectiveness, getFactorHeatmap,
   getAlphaDecayCurve, getModelWeights, getScoredSignals,
   getPerformanceSnapshots, getPerformanceSummary,
   getExecutionSummary, getTradeDeviations, getMissedSignals,
   getPortfolioWithSignalHealth, getDataPipelineStatus, invalidatePipelineStatusCache,
-  precomputeAlphaDecay,
+  precomputeAlphaDecay, ALPHA_DECAY_CACHE_PATH,
 } from "./v3-strategy";
 import {
   runFifoMatching, getPerformanceAnalytics, getEquityCurve,
@@ -516,6 +516,14 @@ export async function registerRoutes(
         }
       }
       storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
+      // Auto-compute trades after successful sync
+      try {
+        const signalResult = runSignalTradeMatching();
+        const fifoResult = runFifoMatching();
+        console.log(`[PIPELINE] Post-sync trade compute: ${signalResult.matched} signal matches, ${fifoResult.matched} FIFO matches`);
+      } catch (e: any) {
+        console.error("[PIPELINE] Post-sync trade compute failed:", e.message);
+      }
       res.json({ success: true, syncedPositions: syncedCount });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -809,6 +817,20 @@ export async function registerRoutes(
           if (noSignals || (noProgress && !error)) {
             console.log(`[ENRICH] No more enrichable signals (${currentEnriched} total enriched, ${status.enrichmentProgress}%). Stopping continuous mode.`);
             enrichmentContinuous = false;
+            // Auto-chain: run factor research after enrichment completes
+            console.log("[PIPELINE] Enrichment complete. Auto-starting factor research...");
+            const { exec: execFR } = require("child_process");
+            execFR("nice -n 10 python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
+              (frError: any, frStdout: string, frStderr: string) => {
+                if (frError) console.error("[PIPELINE] Factor research failed:", frError.message);
+                if (frStdout) console.log("[PIPELINE] Factor research stdout:", frStdout.slice(-500));
+                if (frStderr) console.error("[PIPELINE] Factor research stderr:", frStderr.slice(-500));
+                console.log("[PIPELINE] Factor research complete. Auto-starting alpha decay...");
+                precomputeAlphaDecay().then(() => {
+                  console.log("[PIPELINE] Full pipeline complete: enrichment → factor research → alpha decay");
+                }).catch((e) => console.error("[PIPELINE] Alpha decay failed:", e.message));
+              }
+            );
           } else {
             lastEnrichedCount = currentEnriched;
             const delay = error ? 30000 : 5000; // 30s retry on error, 5s on success
@@ -914,9 +936,10 @@ export async function registerRoutes(
         if (error) console.error("[FACTOR-RESEARCH] Failed:", error.message);
         if (stdout) console.log("[FACTOR-RESEARCH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[FACTOR-RESEARCH] stderr:", stderr.slice(-500));
-        // Alpha decay pre-computation disabled — crashes server with 36M+ rows
-        // Run separately via POST /api/admin/precompute-alpha-decay if needed
-        console.log("[FACTOR-RESEARCH] Complete. Alpha decay skipped (run separately if needed).");
+        console.log("[PIPELINE] Factor research complete. Auto-starting alpha decay...");
+        precomputeAlphaDecay().then(() => {
+          console.log("[PIPELINE] Alpha decay complete after factor research.");
+        }).catch((e) => console.error("[PIPELINE] Alpha decay failed:", e.message));
       }
     );
     res.json({ status: "factor_research_started" });
@@ -1122,6 +1145,80 @@ chmod +x /opt/deploy.sh`,
       console.error("[ENRICH] Auto-resume check failed:", e.message);
     }
   }, 30000);
+
+  // Schedule daily backup at startup, then every 24 hours
+  const BACKUP_INTERVAL = 24 * 60 * 60 * 1000;
+  function runScheduledBackup() {
+    const { exec } = require("child_process");
+    const backupScript = [
+      'set -e',
+      'sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db"',
+      'TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)[\'access_token\'])")',
+      'DEST="backups/data-$(date +%Y%m%d-%H%M%S).db"',
+      'curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST" | grep -q 200 && echo "[BACKUP] Success: $DEST" || echo "[BACKUP] Failed"',
+      'rm -f /tmp/insider-signal-backup.db',
+    ].join('\n');
+    exec(backupScript, { timeout: 300000, shell: "/bin/bash" }, (error: any, stdout: string, stderr: string) => {
+      if (error) console.error("[BACKUP] Scheduled backup failed:", error.message);
+      if (stdout) console.log("[BACKUP]", stdout.trim());
+    });
+  }
+  // First backup 5 minutes after startup, then every 24 hours
+  setTimeout(() => {
+    runScheduledBackup();
+    setInterval(runScheduledBackup, BACKUP_INTERVAL);
+  }, 5 * 60 * 1000);
+  console.log("[BACKUP] Daily backup scheduled (first run in 5 minutes)");
+
+  // Comprehensive system health endpoint
+  app.get("/api/admin/system-health", (req, res) => {
+    const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const status = getDataPipelineStatus();
+
+    let pollerStatus: any = { status: "unknown" };
+    try {
+      pollerStatus = JSON.parse(fs.readFileSync("/tmp/poller-status.json", "utf-8"));
+    } catch {}
+
+    let alphaDecayStatus = "missing";
+    try {
+      const stat = fs.statSync(ALPHA_DECAY_CACHE_PATH);
+      const ageHours = (Date.now() - stat.mtimeMs) / (1000 * 60 * 60);
+      alphaDecayStatus = ageHours < 24 ? "fresh" : `stale (${Math.round(ageHours)}h old)`;
+    } catch {}
+
+    res.json({
+      server: {
+        uptime: process.uptime(),
+        commit: "see gitLog",
+      },
+      poller: pollerStatus,
+      enrichment: {
+        running: enrichmentRunning,
+        continuous: enrichmentContinuous,
+        progress: status.enrichmentProgress,
+        enrichedSignals: status.enrichedSignals,
+        totalSignals: status.totalSignals,
+      },
+      factorResearch: {
+        factorAnalysisResults: status.factorAnalysisResults,
+        modelFactors: status.modelFactors,
+      },
+      alphaDecay: {
+        cacheStatus: alphaDecayStatus,
+      },
+      data: {
+        totalPurchases: status.totalPurchases,
+        forwardReturnDataPoints: status.forwardReturnDataPoints,
+        insiderProfiles: status.insiderProfiles,
+        failedTickers: status.failedTickers,
+      },
+    });
+  });
 
   return httpServer;
 }
