@@ -1103,5 +1103,25 @@ chmod +x /opt/deploy.sh`,
   // Run manually via POST /api/admin/precompute-alpha-decay when needed.
   // The API endpoint returns [] if the cache file doesn't exist yet.
 
+  // Auto-resume continuous enrichment on server startup after a 30s delay
+  setTimeout(() => {
+    try {
+      invalidatePipelineStatusCache();
+      const status = getDataPipelineStatus();
+      const progress = status.enrichmentProgress ?? 0;
+      if (progress < 100) {
+        console.log(`[ENRICH] Auto-resuming continuous enrichment on startup (current: ${progress}%)`);
+        enrichmentContinuous = true;
+        if (!enrichmentRunning) {
+          runEnrichmentBatch();
+        }
+      } else {
+        console.log(`[ENRICH] Enrichment complete (100%), no auto-resume needed`);
+      }
+    } catch (e: any) {
+      console.error("[ENRICH] Auto-resume check failed:", e.message);
+    }
+  }, 30000);
+
   return httpServer;
 }
