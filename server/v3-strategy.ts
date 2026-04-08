@@ -9,7 +9,7 @@
  * - Alpha decay curves
  */
 
-import { db } from "./db";
+import { db, pool } from "./db";
 import { 
   factorAnalysis, modelWeights, purchaseSignals, signalEntryPrices,
   dailyForwardReturns, insiderTransactions, insiderHistory,
@@ -24,12 +24,12 @@ import { eq, desc, sql, and, gte, lte, isNull, asc } from "drizzle-orm";
 const queryCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-function cachedQuery<T>(key: string, fn: () => T): T {
+async function cachedQuery<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const cached = queryCache.get(key);
   if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
     return cached.data as T;
   }
-  const result = fn();
+  const result = await fn();
   queryCache.set(key, { data: result, timestamp: Date.now() });
   return result;
 }
@@ -39,19 +39,18 @@ function cachedQuery<T>(key: string, fn: () => T): T {
 // ============================================================
 
 /** Get all factor analysis results, optionally filtered by horizon */
-export function getFactorResults(horizon?: number) {
+export async function getFactorResults(horizon?: number) {
   let query = db.select().from(factorAnalysis);
   if (horizon) {
-    return query.where(eq(factorAnalysis.horizon, horizon))
-      .orderBy(factorAnalysis.factorName, desc(factorAnalysis.meanExcessReturn))
-      .all();
+    return await query.where(eq(factorAnalysis.horizon, horizon))
+      .orderBy(factorAnalysis.factorName, desc(factorAnalysis.meanExcessReturn));
   }
-  return query.orderBy(factorAnalysis.factorName, factorAnalysis.horizon).all();
+  return await query.orderBy(factorAnalysis.factorName, factorAnalysis.horizon);
 }
 
 /** Get factor effectiveness summary — best IR per factor */
-export function getFactorEffectiveness() {
-  return db.all(sql`
+export async function getFactorEffectiveness() {
+  const result = await pool.query(`
     SELECT factor_name,
       MAX(ABS(information_ratio)) as best_ir,
       (SELECT horizon FROM factor_analysis fa2 
@@ -72,14 +71,14 @@ export function getFactorEffectiveness() {
     GROUP BY factor_name
     ORDER BY best_ir DESC
   `);
+  return result.rows;
 }
 
 /** Get heatmap data: factor × horizon matrix */
-export function getFactorHeatmap(factorName: string) {
-  return db.select().from(factorAnalysis)
+export async function getFactorHeatmap(factorName: string) {
+  return await db.select().from(factorAnalysis)
     .where(eq(factorAnalysis.factorName, factorName))
-    .orderBy(factorAnalysis.sliceName, factorAnalysis.horizon)
-    .all();
+    .orderBy(factorAnalysis.sliceName, factorAnalysis.horizon);
 }
 
 export const ALPHA_DECAY_CACHE_PATH = "/opt/insider-signal-dash/alpha-decay-cache.json";
@@ -102,52 +101,38 @@ export function getAlphaDecayCurve(options: {
   return [];
 }
 
-/** Pre-compute alpha decay data via sqlite3 CLI (CSV mode) and save to JSON file.
- *  Uses CSV output to avoid OOM from sqlite3 -json on 36M+ rows.
- *  Runs in a separate process to avoid blocking Node.js or locking the DB. */
-export function precomputeAlphaDecay(): Promise<void> {
-  const { exec } = require("child_process");
-  console.log("[ALPHA DECAY] Pre-computing alpha decay curve via sqlite3 CLI...");
-  return new Promise((resolve, reject) => {
-    const sql = `SELECT trading_day, COUNT(*) as sample_size, ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct FROM daily_forward_returns WHERE excess_from_next_open IS NOT NULL GROUP BY trading_day ORDER BY trading_day`;
-    const cmd = `nice -n 19 sqlite3 -csv -header -readonly /opt/insider-signal-dash/data.db "${sql}"`;
-    exec(cmd, { timeout: 600000, maxBuffer: 50 * 1024 * 1024, shell: "/bin/bash" },
-      (error: any, stdout: string, stderr: string) => {
-        if (error) {
-          console.error("[ALPHA DECAY] Failed:", error.message);
-          return reject(error);
-        }
-        try {
-          const lines = stdout.trim().split("\n");
-          if (lines.length < 2) {
-            fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify([]));
-            console.log("[ALPHA DECAY] Done: 0 data points (no results)");
-            return resolve();
-          }
-          const headers = lines[0].split(",");
-          const data = lines.slice(1).map(line => {
-            const vals = line.split(",");
-            const obj: any = {};
-            headers.forEach((h, i) => {
-              obj[h] = isNaN(Number(vals[i])) ? vals[i] : Number(vals[i]);
-            });
-            return obj;
-          });
-          fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify(data));
-          console.log(`[ALPHA DECAY] Done: ${data.length} data points cached`);
-          resolve();
-        } catch (parseErr: any) {
-          console.error("[ALPHA DECAY] CSV parse failed:", parseErr.message);
-          reject(parseErr);
-        }
-      }
-    );
-  });
+/** Pre-compute alpha decay data via PostgreSQL and save to JSON file.
+ *  Uses pool.query to run the aggregation in PostgreSQL (efficient for 36M+ rows). */
+export async function precomputeAlphaDecay(): Promise<void> {
+  console.log("[ALPHA DECAY] Pre-computing alpha decay curve via PostgreSQL...");
+  try {
+    const result = await pool.query(`
+      SELECT trading_day, 
+        COUNT(*) as sample_size, 
+        ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, 
+        ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct 
+      FROM daily_forward_returns 
+      WHERE excess_from_next_open IS NOT NULL 
+      GROUP BY trading_day 
+      ORDER BY trading_day
+    `);
+    const data = result.rows.map((r: any) => ({
+      trading_day: Number(r.trading_day),
+      sample_size: Number(r.sample_size),
+      avg_excess_pct: Number(r.avg_excess_pct),
+      avg_return_pct: Number(r.avg_return_pct),
+    }));
+    fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify(data));
+    console.log(`[ALPHA DECAY] Done: ${data.length} data points cached`);
+  } catch (err: any) {
+    console.error("[ALPHA DECAY] Failed:", err.message);
+    throw err;
+  }
 }
 
 /** Get model weights */
-export function getModelWeights() {
-  return db.select().from(modelWeights).orderBy(desc(modelWeights.effectiveWeight)).all();
+export async function getModelWeights() {
+  return await db.select().from(modelWeights).orderBy(desc(modelWeights.effectiveWeight));
 }
 
 // ============================================================
@@ -155,19 +140,16 @@ export function getModelWeights() {
 // ============================================================
 
 /** Get scored signals with factor breakdowns — deduplicated by (ticker, date), keeping highest ID */
-export function getScoredSignals(limit = 50, minScore?: number) {
+export async function getScoredSignals(limit = 50, minScore?: number) {
   // Fetch signals with entry prices using Drizzle ORM
-  let query = db.select({
+  const results = await db.select({
     signal: purchaseSignals,
     entryPrice: signalEntryPrices,
   })
     .from(purchaseSignals)
-    .leftJoin(signalEntryPrices, eq(purchaseSignals.id, signalEntryPrices.signalId));
-
-  const results = query
+    .leftJoin(signalEntryPrices, eq(purchaseSignals.id, signalEntryPrices.signalId))
     .orderBy(desc(purchaseSignals.signalScore), desc(purchaseSignals.signalDate))
-    .limit(limit * 3) // fetch extra to account for dedup
-    .all();
+    .limit(limit * 3); // fetch extra to account for dedup
 
   // Deduplicate in JS: keep only the highest ID per (ticker, date)
   const seen = new Map<string, number>();
@@ -194,16 +176,15 @@ export function getScoredSignals(limit = 50, minScore?: number) {
 }
 
 /** Get strategy recommendations */
-export function getStrategyRecommendations(status = "active") {
-  return db.select({
+export async function getStrategyRecommendations(status = "active") {
+  return await db.select({
     rec: strategyRecommendations,
     signal: purchaseSignals,
   })
     .from(strategyRecommendations)
     .leftJoin(purchaseSignals, eq(strategyRecommendations.signalId, purchaseSignals.id))
     .where(eq(strategyRecommendations.currentStatus, status))
-    .orderBy(desc(strategyRecommendations.compositeScore))
-    .all();
+    .orderBy(desc(strategyRecommendations.compositeScore));
 }
 
 // ============================================================
@@ -211,20 +192,18 @@ export function getStrategyRecommendations(status = "active") {
 // ============================================================
 
 /** Get performance snapshots for strategy vs user vs benchmark */
-export function getPerformanceSnapshots(days = 90) {
-  return db.select().from(strategySnapshots)
+export async function getPerformanceSnapshots(days = 90) {
+  const rows = await db.select().from(strategySnapshots)
     .orderBy(desc(strategySnapshots.date))
-    .limit(days)
-    .all()
-    .reverse(); // Oldest first for charts
+    .limit(days);
+  return rows.reverse(); // Oldest first for charts
 }
 
 /** Get performance summary KPIs */
-export function getPerformanceSummary() {
-  const snapshots = db.select().from(strategySnapshots)
+export async function getPerformanceSummary() {
+  const snapshots = await db.select().from(strategySnapshots)
     .orderBy(desc(strategySnapshots.date))
-    .limit(252) // 1 year
-    .all();
+    .limit(252); // 1 year
   
   if (snapshots.length === 0) return null;
   
@@ -258,8 +237,8 @@ export function getPerformanceSummary() {
 // ============================================================
 
 /** Get execution deviation summary KPIs */
-export function getExecutionSummary() {
-  const deviations = db.select().from(executionDeviations).all();
+export async function getExecutionSummary() {
+  const deviations = await db.select().from(executionDeviations);
   
   const signalAligned = deviations.filter(d => d.classification === "signal_aligned");
   const independent = deviations.filter(d => d.classification === "independent");
@@ -286,8 +265,8 @@ export function getExecutionSummary() {
 }
 
 /** Get trade-level deviation details */
-export function getTradeDeviations(limit = 100) {
-  return db.select({
+export async function getTradeDeviations(limit = 100) {
+  return await db.select({
     deviation: executionDeviations,
     trade: tradeExecutions,
     signal: purchaseSignals,
@@ -296,13 +275,12 @@ export function getTradeDeviations(limit = 100) {
     .leftJoin(tradeExecutions, eq(executionDeviations.userTradeId, tradeExecutions.id))
     .leftJoin(purchaseSignals, eq(executionDeviations.signalId, purchaseSignals.id))
     .orderBy(desc(executionDeviations.createdAt))
-    .limit(limit)
-    .all();
+    .limit(limit);
 }
 
 /** Get missed signals (tier 1-2 signals the user didn't trade) */
-export function getMissedSignals(days = 90) {
-  return db.all(sql`
+export async function getMissedSignals(days = 90) {
+  const result = await pool.query(`
     SELECT ps.*, sep.next_open as entry_price,
       (SELECT ROUND(dfr.excess_from_next_open * 100, 2) FROM daily_forward_returns dfr 
        WHERE dfr.signal_id = ps.id AND dfr.trading_day = 63 LIMIT 1) as excess_63d_pct,
@@ -311,13 +289,14 @@ export function getMissedSignals(days = 90) {
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
     WHERE ps.score_tier <= 2
-      AND ps.signal_date >= date('now', '-' || ${days} || ' days')
+      AND ps.signal_date >= CURRENT_DATE - INTERVAL '1 day' * $1
       AND ps.id NOT IN (
         SELECT DISTINCT signal_id FROM execution_deviations WHERE signal_id IS NOT NULL
       )
     ORDER BY ps.signal_score DESC
     LIMIT 50
-  `);
+  `, [days]);
+  return result.rows;
 }
 
 // ============================================================
@@ -369,16 +348,17 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
 
   // Fall back to DB positions if Schwab fetch returned nothing
   if (positions.length === 0) {
-    positions = db.select().from(portfolioPositions).all();
+    positions = await db.select().from(portfolioPositions);
   }
 
   // For each position, check if ticker matches a recent purchase signal (last 90 days)
-  const recentSignals = db.all(sql`
+  const recentSignalsResult = await pool.query(`
     SELECT id, issuer_ticker, signal_date, signal_score, score_tier
     FROM purchase_signals
-    WHERE signal_date >= date('now', '-90 days')
+    WHERE signal_date >= CURRENT_DATE - INTERVAL '90 days'
     ORDER BY signal_date DESC
-  `) as any[];
+  `);
+  const recentSignals = recentSignalsResult.rows;
 
   const signalByTicker = new Map<string, any>();
   for (const sig of recentSignals) {
@@ -468,51 +448,37 @@ export function invalidatePipelineStatusCache() {
   _pipelineStatusCacheTime = 0;
 }
 
-export function getDataPipelineStatus() {
+export async function getDataPipelineStatus() {
   const now = Date.now();
   if (_pipelineStatusCache && (now - _pipelineStatusCacheTime) < PIPELINE_STATUS_CACHE_TTL) {
     return _pipelineStatusCache;
   }
 
-  // Use MAX(rowid) for large tables — O(1) index lookup vs O(n) full scan
-  // For dailyForwardReturns (23M+ rows), COUNT(*) takes 10+ seconds and freezes the event loop
-  const txCount = db.select({ count: sql<number>`count(*)` })
-    .from(insiderTransactions)
-    .where(eq(insiderTransactions.transactionType, "P"))
-    .get();
+  // Run all count queries in parallel for speed
+  const [txCount, signalCount, enrichedCount, fwdReturnApprox, factorCount, weightCount, insiderCount, failedTickers] = await Promise.all([
+    pool.query(`SELECT count(*) as count FROM insider_transactions WHERE transaction_type = 'P'`),
+    pool.query(`SELECT count(*) as count FROM purchase_signals`),
+    pool.query(`SELECT count(DISTINCT signal_id) as count FROM signal_entry_prices`),
+    // Fast approximate count using pg_class for large tables
+    pool.query(`SELECT GREATEST(reltuples::bigint, 0) as count FROM pg_class WHERE relname = 'daily_forward_returns'`).catch(() => ({ rows: [{ count: 0 }] })),
+    pool.query(`SELECT count(*) as count FROM factor_analysis`),
+    pool.query(`SELECT count(*) as count FROM model_weights`),
+    pool.query(`SELECT count(*) as count FROM insider_history`),
+    pool.query(`SELECT COUNT(*) as count FROM enrichment_failed_tickers`).catch(() => ({ rows: [{ count: 0 }] })),
+  ]);
   
-  const signalCount = db.select({ count: sql<number>`count(*)` }).from(purchaseSignals).get();
-  const enrichedCount = db.select({ count: sql<number>`count(DISTINCT signal_id)` }).from(signalEntryPrices).get();
-  
-  // Fast approximate count for large tables using MAX(rowid)
-  const fwdReturnApprox = db.all(sql`SELECT MAX(rowid) as count FROM daily_forward_returns`) as any;
-  const fwdReturnCount = fwdReturnApprox?.[0]?.count || 0;
-  
-  const factorCount = db.select({ count: sql<number>`count(*)` }).from(factorAnalysis).get();
-  const weightCount = db.select({ count: sql<number>`count(*)` }).from(modelWeights).get();
-  const insiderCount = db.select({ count: sql<number>`count(*)` }).from(insiderHistory).get();
-  
-  // Simple failed ticker count (fast query — just counts the tracking table)
-  let failedTickerCount = 0;
-  try {
-    const ft = db.all(sql`SELECT COUNT(*) as count FROM enrichment_failed_tickers`);
-    failedTickerCount = (ft as any)?.[0]?.count || 0;
-  } catch (e) {
-    // Table may not exist yet
-  }
-  
-  const totalAll = signalCount?.count || 0;
-  const enriched = enrichedCount?.count || 0;
+  const totalAll = Number(signalCount.rows[0]?.count || 0);
+  const enriched = Number(enrichedCount.rows[0]?.count || 0);
   
   _pipelineStatusCache = {
-    totalPurchases: txCount?.count || 0,
+    totalPurchases: Number(txCount.rows[0]?.count || 0),
     totalSignals: totalAll,
     enrichedSignals: enriched,
-    failedTickers: failedTickerCount,
-    forwardReturnDataPoints: fwdReturnCount,
-    factorAnalysisResults: factorCount?.count || 0,
-    modelFactors: weightCount?.count || 0,
-    insiderProfiles: insiderCount?.count || 0,
+    failedTickers: Number(failedTickers.rows[0]?.count || 0),
+    forwardReturnDataPoints: Number(fwdReturnApprox.rows[0]?.count || 0),
+    factorAnalysisResults: Number(factorCount.rows[0]?.count || 0),
+    modelFactors: Number(weightCount.rows[0]?.count || 0),
+    insiderProfiles: Number(insiderCount.rows[0]?.count || 0),
     enrichmentProgress: totalAll > 0 ? Math.round((enriched / totalAll) * 100) : 0,
   };
   _pipelineStatusCacheTime = now;

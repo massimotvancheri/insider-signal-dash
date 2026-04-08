@@ -10,33 +10,38 @@ echo "Setting up systemd services..."
 cat > /etc/systemd/system/insider-signal.service << 'EOF'
 [Unit]
 Description=Insider Signal Dashboard
-After=network.target
+After=network.target postgresql.service
+Requires=postgresql.service
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/insider-signal-dash
 ExecStart=/usr/bin/node dist/index.cjs
-Environment=NODE_ENV=production PORT=80
+Environment=NODE_ENV=production PORT=80 DATABASE_URL=postgresql://postgres@localhost:5432/insider_signal
 Restart=always
 RestartSec=5
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# EDGAR poller service (separate process)
+# EDGAR poller service (separate process with resource limits)
 cat > /etc/systemd/system/insider-signal-poller.service << 'EOF'
 [Unit]
 Description=Insider Signal EDGAR Poller
-After=network.target
+After=network.target postgresql.service
+Requires=postgresql.service
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/insider-signal-dash
 ExecStart=/usr/bin/node dist/poller.cjs
-Environment=NODE_ENV=production
+Environment=NODE_ENV=production DATABASE_URL=postgresql://postgres@localhost:5432/insider_signal
 Restart=always
 RestartSec=10
+CPUQuota=20%
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

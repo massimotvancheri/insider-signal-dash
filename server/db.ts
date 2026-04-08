@@ -1,13 +1,16 @@
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
 
-const sqlite = new Database("data.db");
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("busy_timeout = 30000");
-sqlite.pragma("cache_size = -20000"); // 20MB cache
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL || "postgresql://postgres@localhost:5432/insider_signal",
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
 
-// Indexes are created via /api/admin/create-indexes endpoint (non-blocking, uses sqlite3 CLI)
-// This avoids blocking the Node.js event loop on startup with large tables
+pool.on("error", (err) => {
+  console.error("[DB] Unexpected pool error:", err.message);
+});
 
-export const db = drizzle(sqlite);
-export { sqlite };
+export const db = drizzle(pool);
+export { pool };

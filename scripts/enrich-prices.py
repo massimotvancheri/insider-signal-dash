@@ -2,7 +2,7 @@
 """
 Market Data Enrichment — Price & Forward Returns
 Fetches historical prices via yfinance for all signal tickers,
-computes forward returns, and stores in SQLite.
+computes forward returns, and stores in PostgreSQL.
 
 Usage:
   python3 scripts/enrich-prices.py [max_tickers] [start_year]
@@ -10,60 +10,63 @@ Usage:
   python3 scripts/enrich-prices.py 5000 2020   # Full enrichment
 """
 
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import sys
 import time
+import os
 from datetime import datetime, timedelta
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import json
 
-DB_PATH = "data.db"
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres@localhost:5432/insider_signal")
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn = psycopg2.connect(DB_URL)
+    conn.autocommit = False
     # Create failed tickers table if not exists
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS enrichment_failed_tickers (
-            ticker TEXT PRIMARY KEY,
-            fail_count INTEGER DEFAULT 1,
-            last_failed_at TEXT
-        )
-    """)
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_failed_tickers (
+                ticker TEXT PRIMARY KEY,
+                fail_count INTEGER DEFAULT 1,
+                last_failed_at TEXT
+            )
+        """)
     conn.commit()
     return conn
 
 def get_signals_to_enrich(conn, start_year=2020, max_signals=5000):
     """Get signals that need enrichment, prioritized by score and recency.
     Excludes tickers that have permanently failed (no data on Yahoo Finance)."""
-    cursor = conn.execute("""
-        SELECT ps.id, ps.issuer_ticker, ps.signal_date, ps.signal_score, ps.avg_purchase_price
-        FROM purchase_signals ps
-        WHERE ps.issuer_ticker IS NOT NULL
-          AND ps.issuer_ticker != ''
-          AND ps.issuer_ticker != 'NONE'
-          AND ps.issuer_ticker != 'N/A'
-          AND ps.signal_date >= ?
-          AND ps.id NOT IN (SELECT signal_id FROM signal_entry_prices)
-          AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers)
-        ORDER BY ps.signal_score DESC, ps.signal_date DESC
-        LIMIT ?
-    """, (f"{start_year}-01-01", max_signals))
-    return cursor.fetchall()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT ps.id, ps.issuer_ticker, ps.signal_date, ps.signal_score, ps.avg_purchase_price
+            FROM purchase_signals ps
+            WHERE ps.issuer_ticker IS NOT NULL
+              AND ps.issuer_ticker != ''
+              AND ps.issuer_ticker != 'NONE'
+              AND ps.issuer_ticker != 'N/A'
+              AND ps.signal_date >= %s
+              AND ps.id NOT IN (SELECT signal_id FROM signal_entry_prices)
+              AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers)
+            ORDER BY ps.signal_score DESC, ps.signal_date DESC
+            LIMIT %s
+        """, (f"{start_year}-01-01", max_signals))
+        return cur.fetchall()
 
 def mark_ticker_failed(conn, ticker):
     """Mark a ticker as failed so it's skipped in future batches."""
-    conn.execute("""
-        INSERT INTO enrichment_failed_tickers (ticker, fail_count, last_failed_at)
-        VALUES (?, 1, ?)
-        ON CONFLICT(ticker) DO UPDATE SET
-          fail_count = fail_count + 1,
-          last_failed_at = ?
-    """, (ticker, datetime.now().isoformat(), datetime.now().isoformat()))
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO enrichment_failed_tickers (ticker, fail_count, last_failed_at)
+            VALUES (%s, 1, %s)
+            ON CONFLICT(ticker) DO UPDATE SET
+              fail_count = enrichment_failed_tickers.fail_count + 1,
+              last_failed_at = %s
+        """, (ticker, datetime.now().isoformat(), datetime.now().isoformat()))
     conn.commit()
 
 def fetch_spy_data():
@@ -175,21 +178,22 @@ def compute_forward_returns(conn, signal, prices, spy_data):
         price_drift = (prior_close["close"] / insider_tx_price) - 1
     
     # Save entry prices
-    conn.execute("""
-        INSERT INTO signal_entry_prices 
-        (signal_id, filing_timestamp, prior_close, ah_price, ah_spread_pct,
-         next_open, next_vwap, overnight_gap, ah_net_premium, insider_tx_price, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        signal_id, None,
-        prior_close["close"] if prior_close else None,
-        None, None,  # AH data not available from daily
-        entry_open,
-        next_open_day["close"],  # Approximate VWAP with close
-        overnight_gap, None,
-        insider_tx_price,
-        datetime.now().isoformat()
-    ))
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_entry_prices 
+            (signal_id, filing_timestamp, prior_close, ah_price, ah_spread_pct,
+             next_open, next_vwap, overnight_gap, ah_net_premium, insider_tx_price, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            signal_id, None,
+            prior_close["close"] if prior_close else None,
+            None, None,  # AH data not available from daily
+            entry_open,
+            next_open_day["close"],  # Approximate VWAP with close
+            overnight_gap, None,
+            insider_tx_price,
+            datetime.now().isoformat()
+        ))
     
     # Compute daily forward returns (day 0 through 252)
     forward_prices = [p for p in prices if p["date"] >= filing_date]
@@ -221,12 +225,13 @@ def compute_forward_returns(conn, signal, prices, spy_data):
         ))
     
     if rows_to_insert:
-        conn.executemany("""
-            INSERT INTO daily_forward_returns
-            (signal_id, trading_day, calendar_date, close_price, benchmark_close,
-             return_from_next_open, return_from_ah_entry, excess_from_next_open, excess_from_ah_entry)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, rows_to_insert)
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """
+                INSERT INTO daily_forward_returns
+                (signal_id, trading_day, calendar_date, close_price, benchmark_close,
+                 return_from_next_open, return_from_ah_entry, excess_from_next_open, excess_from_ah_entry)
+                VALUES %s
+            """, rows_to_insert)
     
     # Update transaction records with market context
     updates = {}
@@ -264,11 +269,12 @@ def compute_forward_returns(conn, signal, prices, spy_data):
             updates["recent_volume_spike"] = avg5 / updates["avg_daily_volume"]
     
     if updates:
-        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        conn.execute(f"""
-            UPDATE insider_transactions SET {set_clause}
-            WHERE issuer_ticker = ? AND filing_date = ?
-        """, list(updates.values()) + [signal["issuer_ticker"], filing_date])
+        set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE insider_transactions SET {set_clause}
+                WHERE issuer_ticker = %s AND filing_date = %s
+            """, list(updates.values()) + [signal["issuer_ticker"], filing_date])
     
     return True
 
@@ -352,8 +358,11 @@ def main():
     conn.commit()
     
     # Final stats
-    entry_count = conn.execute("SELECT COUNT(*) FROM signal_entry_prices").fetchone()[0]
-    fwd_count = conn.execute("SELECT COUNT(*) FROM daily_forward_returns").fetchone()[0]
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM signal_entry_prices")
+        entry_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM daily_forward_returns")
+        fwd_count = cur.fetchone()[0]
     
     print(f"\n=== Enrichment Complete ===")
     print(f"Tickers processed: {len(tickers)}")

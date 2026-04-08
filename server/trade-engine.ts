@@ -9,7 +9,7 @@
  * - Missed signals (high-score signals user didn't trade)
  */
 
-import { db, sqlite } from "./db";
+import { db, pool } from "./db";
 import {
   tradeExecutions, closedTrades, executionDeviations,
   portfolioPositions, purchaseSignals, signalEntryPrices
@@ -44,17 +44,16 @@ interface FifoLot {
   signalScore: number | null;
 }
 
-export function runFifoMatching(): { matched: number; errors: string[] } {
+export async function runFifoMatching(): Promise<{ matched: number; errors: string[] }> {
   const errors: string[] = [];
   let matched = 0;
 
   // Clear existing closed trades so we can recompute cleanly
-  sqlite.exec("DELETE FROM closed_trades");
+  await pool.query("DELETE FROM closed_trades");
 
   // Get all executions ordered by date ASC for FIFO
-  const allTrades = db.select().from(tradeExecutions)
-    .orderBy(asc(tradeExecutions.executionDate), asc(tradeExecutions.id))
-    .all() as TradeRow[];
+  const allTrades = await db.select().from(tradeExecutions)
+    .orderBy(asc(tradeExecutions.executionDate), asc(tradeExecutions.id)) as TradeRow[];
 
   // Group by ticker
   const byTicker = new Map<string, TradeRow[]>();
@@ -99,13 +98,14 @@ export function runFifoMatching(): { matched: number; errors: string[] } {
           ));
 
           // Look up signal classification from execution_deviations for this buy
-          const devRow = db.all(sql`
+          const devResult = await pool.query(`
             SELECT classification, signal_id FROM execution_deviations
-            WHERE user_trade_id = ${lot.tradeId} LIMIT 1
-          `) as any[];
+            WHERE user_trade_id = $1 LIMIT 1
+          `, [lot.tradeId]);
+          const devRow = devResult.rows;
 
           try {
-            db.insert(closedTrades).values({
+            await db.insert(closedTrades).values({
               ticker: lot.ticker,
               companyName: lot.companyName,
               entryDate: lot.entryDate,
@@ -121,7 +121,7 @@ export function runFifoMatching(): { matched: number; errors: string[] } {
               signalScoreAtEntry: lot.signalScore || null,
               exitType: "discretionary",
               createdAt: new Date().toISOString(),
-            }).run();
+            });
             matched++;
           } catch (e: any) {
             errors.push(`${ticker}: ${e.message}`);
@@ -149,17 +149,16 @@ export function runFifoMatching(): { matched: number; errors: string[] } {
 // PERFORMANCE ANALYTICS
 // ============================================================
 
-export function getPerformanceAnalytics() {
-  const closed = db.select().from(closedTrades)
-    .orderBy(asc(closedTrades.exitDate))
-    .all();
+export async function getPerformanceAnalytics() {
+  const closed = await db.select().from(closedTrades)
+    .orderBy(asc(closedTrades.exitDate));
 
   if (closed.length === 0) {
     return null;
   }
 
   // Get unrealized P&L from portfolio positions
-  const positions = db.select().from(portfolioPositions).all();
+  const positions = await db.select().from(portfolioPositions);
   const totalUnrealizedPnl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
   const totalMarketValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
 
@@ -229,10 +228,9 @@ export function getPerformanceAnalytics() {
 // EQUITY CURVE (Cumulative P&L over time)
 // ============================================================
 
-export function getEquityCurve() {
-  const closed = db.select().from(closedTrades)
-    .orderBy(asc(closedTrades.exitDate))
-    .all();
+export async function getEquityCurve() {
+  const closed = await db.select().from(closedTrades)
+    .orderBy(asc(closedTrades.exitDate));
 
   if (closed.length === 0) return [];
 
@@ -270,35 +268,36 @@ export function getEquityCurve() {
 // SIGNAL-TRADE MATCHING
 // ============================================================
 
-export function runSignalTradeMatching(): { matched: number; unmatched: number; errors: string[] } {
+export async function runSignalTradeMatching(): Promise<{ matched: number; unmatched: number; errors: string[] }> {
   const errors: string[] = [];
   let matched = 0;
   let unmatched = 0;
 
   // Get all execution deviations with their trade info
-  const deviations = db.all(sql`
+  const deviationsResult = await pool.query(`
     SELECT ed.id as dev_id, ed.user_trade_id, ed.signal_id, ed.classification,
            te.ticker, te.execution_date, te.avg_price, te.side
     FROM execution_deviations ed
     JOIN trade_executions te ON te.id = ed.user_trade_id
     WHERE te.side = 'BUY'
-  `) as any[];
+  `);
+  const deviations = deviationsResult.rows;
 
   for (const dev of deviations) {
     // Search for matching signals: same ticker, filed within 90 days BEFORE the trade
-    const matchingSignals = db.all(sql`
+    const matchingResult = await pool.query(`
       SELECT ps.id, ps.signal_score, ps.signal_date, ps.score_tier,
              sep.next_open as entry_price, sep.prior_close
       FROM purchase_signals ps
       LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
-      WHERE UPPER(ps.issuer_ticker) = UPPER(${dev.ticker})
-        AND ps.signal_date <= ${dev.execution_date}
-        AND ps.signal_date >= date(${dev.execution_date}, '-90 days')
+      WHERE UPPER(ps.issuer_ticker) = UPPER($1)
+        AND ps.signal_date <= $2
+        AND ps.signal_date >= ($2::date - INTERVAL '90 days')::text
       ORDER BY ps.signal_score DESC, ps.signal_date DESC
       LIMIT 1
-    `) as any[];
+    `, [dev.ticker, dev.execution_date]);
 
-    const bestSignal = matchingSignals[0];
+    const bestSignal = matchingResult.rows[0];
 
     if (bestSignal) {
       const signalDate = new Date(bestSignal.signal_date);
@@ -315,22 +314,22 @@ export function runSignalTradeMatching(): { matched: number; unmatched: number; 
       }
 
       // Update the deviation record
-      sqlite.exec(`
+      await pool.query(`
         UPDATE execution_deviations
-        SET signal_id = ${bestSignal.id},
+        SET signal_id = $1,
             classification = 'signal_aligned',
-            entry_delay_days = ${entryDelayDays},
-            entry_price_gap_pct = ${entryPriceGapPct !== null ? entryPriceGapPct : 'NULL'}
-        WHERE id = ${dev.dev_id}
-      `);
+            entry_delay_days = $2,
+            entry_price_gap_pct = $3
+        WHERE id = $4
+      `, [bestSignal.id, entryDelayDays, entryPriceGapPct, dev.dev_id]);
 
       // Also update the trade execution's signal reference
-      sqlite.exec(`
+      await pool.query(`
         UPDATE trade_executions
-        SET signal_id = ${bestSignal.id},
-            signal_score = ${bestSignal.signal_score}
-        WHERE id = ${dev.user_trade_id}
-      `);
+        SET signal_id = $1,
+            signal_score = $2
+        WHERE id = $3
+      `, [bestSignal.id, bestSignal.signal_score, dev.user_trade_id]);
 
       matched++;
     } else {
@@ -345,15 +344,15 @@ export function runSignalTradeMatching(): { matched: number; unmatched: number; 
 // ENHANCED MISSED SIGNALS
 // ============================================================
 
-export function getEnhancedMissedSignals(days = 90, minScore = 70) {
+export async function getEnhancedMissedSignals(days = 90, minScore = 70) {
   // Get all tickers the user has traded
-  const tradedTickers = db.all(sql`
+  const tradedResult = await pool.query(`
     SELECT DISTINCT UPPER(ticker) as ticker FROM trade_executions
-  `) as any[];
-  const tradedSet = new Set(tradedTickers.map(t => t.ticker));
+  `);
+  const tradedSet = new Set(tradedResult.rows.map((t: any) => t.ticker));
 
   // Get high-scoring signals from the last N days
-  const signals = db.all(sql`
+  const signalsResult = await pool.query(`
     SELECT ps.id, ps.issuer_ticker, ps.issuer_name, ps.signal_date,
            ps.signal_score, ps.score_tier, ps.cluster_size, ps.total_purchase_value,
            sep.next_open as entry_price, sep.prior_close,
@@ -368,20 +367,20 @@ export function getEnhancedMissedSignals(days = 90, minScore = 70) {
             WHERE dfr.signal_id = ps.id AND dfr.trading_day = 21 LIMIT 1) as return_21d_pct
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
-    WHERE ps.signal_score >= ${minScore}
-      AND ps.signal_date >= date('now', '-' || ${days} || ' days')
+    WHERE ps.signal_score >= $1
+      AND ps.signal_date >= CURRENT_DATE - INTERVAL '1 day' * $2
     ORDER BY ps.signal_score DESC
     LIMIT 100
-  `) as any[];
+  `, [minScore, days]);
 
   // Filter out signals where user has a trade for that ticker
-  const missed = signals.filter(s => {
+  const missed = signalsResult.rows.filter((s: any) => {
     const ticker = (s.issuer_ticker || "").toUpperCase();
     return !tradedSet.has(ticker);
   });
 
   // Estimate alpha missed: use the actual forward return if available
-  return missed.map(s => ({
+  return missed.map((s: any) => ({
     id: s.id,
     ticker: s.issuer_ticker,
     companyName: s.issuer_name,

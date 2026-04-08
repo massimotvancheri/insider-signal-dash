@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { sql } from "drizzle-orm";
 import fs, { readFileSync } from "fs";
 import {
@@ -36,13 +36,13 @@ export async function registerRoutes(
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
-    const tradeCount = db.all(sql`SELECT count(*) as c FROM trade_executions`)[0] as any;
-    const closedCount = db.all(sql`SELECT count(*) as c FROM closed_trades`)[0] as any;
+    const tradeCount = (await db.execute(sql`SELECT count(*) as c FROM trade_executions`)[0] as any;
+    const closedCount = (await db.execute(sql`SELECT count(*) as c FROM closed_trades`)[0] as any;
     if (tradeCount?.c > 0 && closedCount?.c === 0) {
       console.log("[STARTUP] Running signal-trade matching and FIFO matching...");
-      const sigResult = runSignalTradeMatching();
+      const sigResult = await runSignalTradeMatching();
       console.log(`[STARTUP] Signal matching: ${sigResult.matched} matched, ${sigResult.unmatched} unmatched`);
-      const fifoResult = runFifoMatching();
+      const fifoResult = await runFifoMatching();
       console.log(`[STARTUP] FIFO matching: ${fifoResult.matched} closed trades created`);
     }
   } catch (e: any) {
@@ -54,31 +54,31 @@ export async function registerRoutes(
   // ============================================================
 
   /** Dashboard summary KPIs */
-  app.get("/api/dashboard", (_req, res) => {
+  app.get("/api/dashboard", async (_req, res) => {
     try {
     // Try recent data first, fall back to all-time for historical-only mode
-    let purchaseCount30d = storage.getPurchaseCount(30);
-    let purchaseCount7d = storage.getPurchaseCount(7);
-    let purchaseCount1d = storage.getPurchaseCount(1);
-    let volume30d = storage.getRecentPurchaseVolume(30);
-    let volume7d = storage.getRecentPurchaseVolume(7);
-    const totalTransactions = storage.getTransactionCount();
-    let clusters = storage.getClusterBuys(30);
+    let purchaseCount30d = await storage.getPurchaseCount(30);
+    let purchaseCount7d = await storage.getPurchaseCount(7);
+    let purchaseCount1d = await storage.getPurchaseCount(1);
+    let volume30d = await storage.getRecentPurchaseVolume(30);
+    let volume7d = await storage.getRecentPurchaseVolume(7);
+    const totalTransactions = await storage.getTransactionCount();
+    let clusters = await storage.getClusterBuys(30);
     const pollingStatus = getPollerStatus();
 
     // If no recent data, show last 90 days of historical data
     if (purchaseCount30d === 0) {
-      purchaseCount30d = storage.getPurchaseCount(90);
-      purchaseCount7d = storage.getPurchaseCount(90);
-      volume30d = storage.getRecentPurchaseVolume(90);
-      volume7d = storage.getRecentPurchaseVolume(90);
-      clusters = storage.getClusterBuys(90);
+      purchaseCount30d = await storage.getPurchaseCount(90);
+      purchaseCount7d = await storage.getPurchaseCount(90);
+      volume30d = await storage.getRecentPurchaseVolume(90);
+      volume7d = await storage.getRecentPurchaseVolume(90);
+      clusters = await storage.getClusterBuys(90);
     }
     // If still no data, use all-time
     if (purchaseCount30d === 0) {
-      purchaseCount30d = storage.getPurchaseCount(36500);
-      volume30d = storage.getRecentPurchaseVolume(36500);
-      clusters = storage.getClusterBuys(36500);
+      purchaseCount30d = await storage.getPurchaseCount(36500);
+      volume30d = await storage.getRecentPurchaseVolume(36500);
+      clusters = await storage.getClusterBuys(36500);
     }
 
     res.json({
@@ -100,50 +100,50 @@ export async function registerRoutes(
   });
 
   /** Scored signals feed with factor breakdowns */
-  app.get("/api/signals", (req, res) => {
+  app.get("/api/signals", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const minScore = req.query.minScore ? parseInt(req.query.minScore as string) : undefined;
-    res.json(getScoredSignals(limit, minScore));
+    res.json(await getScoredSignals(limit, minScore));
   });
 
   /** Transactions feed — with auto-widen fallback */
-  app.get("/api/transactions", (req, res) => {
+  app.get("/api/transactions", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 100;
     const type = req.query.type as string;
     const days = parseInt(req.query.days as string) || 30;
     if (type === "P") {
-      let result = storage.getPurchaseTransactions(limit, days);
-      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 90);
-      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 365);
-      if (result.length === 0) result = storage.getPurchaseTransactions(limit, 36500);
+      let result = await storage.getPurchaseTransactions(limit, days);
+      if (result.length === 0) result = await storage.getPurchaseTransactions(limit, 90);
+      if (result.length === 0) result = await storage.getPurchaseTransactions(limit, 365);
+      if (result.length === 0) result = await storage.getPurchaseTransactions(limit, 36500);
       res.json(result);
     } else {
-      res.json(storage.getTransactions(limit));
+      res.json(await storage.getTransactions(limit));
     }
   });
 
   /** Analytics endpoints — auto-widen fallback (needs ≥10 points for useful charts) */
   const MIN_CHART_POINTS = 10;
-  app.get("/api/analytics/daily-volume", (req, res) => {
+  app.get("/api/analytics/daily-volume", async (req, res) => {
     const days = parseInt(req.query.days as string) || 30;
     for (const d of [days, 90, 365, 36500]) {
-      const result = storage.getDailyPurchaseVolume(d);
+      const result = await storage.getDailyPurchaseVolume(d);
       if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
     }
   });
 
-  app.get("/api/analytics/cluster-buys", (req, res) => {
+  app.get("/api/analytics/cluster-buys", async (req, res) => {
     const days = parseInt(req.query.days as string) || 30;
     for (const d of [days, 90, 365, 36500]) {
-      const result = storage.getClusterBuys(d);
+      const result = await storage.getClusterBuys(d);
       if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
     }
   });
 
-  app.get("/api/analytics/insider-types", (req, res) => {
+  app.get("/api/analytics/insider-types", async (req, res) => {
     const days = parseInt(req.query.days as string) || 30;
     for (const d of [days, 90, 365, 36500]) {
-      const result = storage.getInsiderTypeBreakdown(d);
+      const result = await storage.getInsiderTypeBreakdown(d);
       if (result.length >= MIN_CHART_POINTS || d === 36500) return res.json(result);
     }
   });
@@ -153,26 +153,26 @@ export async function registerRoutes(
   // ============================================================
 
   /** Factor effectiveness summary — all factors ranked by IR */
-  app.get("/api/factors/effectiveness", (_req, res) => {
-    res.json(getFactorEffectiveness());
+  app.get("/api/factors/effectiveness", async (_req, res) => {
+    res.json(await getFactorEffectiveness());
   });
 
   /** Factor analysis results — optionally filtered by horizon */
-  app.get("/api/factors/analysis", (req, res) => {
+  app.get("/api/factors/analysis", async (req, res) => {
     const horizon = req.query.horizon ? parseInt(req.query.horizon as string) : undefined;
-    res.json(getFactorResults(horizon));
+    res.json(await getFactorResults(horizon));
   });
 
   /** Factor heatmap — slices × horizons for a specific factor */
-  app.get("/api/factors/heatmap/:factorName", (req, res) => {
-    res.json(getFactorHeatmap(req.params.factorName));
+  app.get("/api/factors/heatmap/:factorName", async (req, res) => {
+    res.json(await getFactorHeatmap(req.params.factorName));
   });
 
   /** Alpha decay curve — average excess return at each trading day (cached, heavy query) */
-  app.get("/api/factors/alpha-decay", (req, res) => {
+  app.get("/api/factors/alpha-decay", async (req, res) => {
     try {
       const scoreTier = req.query.tier ? parseInt(req.query.tier as string) : undefined;
-      res.json(getAlphaDecayCurve({ scoreTier }));
+      res.json(await getAlphaDecayCurve({ scoreTier }));
     } catch (err: any) {
       console.error("[/api/factors/alpha-decay ERROR]", err.message);
       res.status(500).json({ error: "Alpha decay computation failed", detail: err.message });
@@ -180,8 +180,8 @@ export async function registerRoutes(
   });
 
   /** Model weights — data-derived scoring weights */
-  app.get("/api/factors/model-weights", (_req, res) => {
-    res.json(getModelWeights());
+  app.get("/api/factors/model-weights", async (_req, res) => {
+    res.json(await getModelWeights());
   });
 
   // ============================================================
@@ -218,14 +218,14 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/portfolio/executions", (req, res) => {
+  app.get("/api/portfolio/executions", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 100;
-    res.json(storage.getTradeExecutions(limit));
+    res.json(await storage.getTradeExecutions(limit));
   });
 
-  app.get("/api/portfolio/closed-trades", (req, res) => {
+  app.get("/api/portfolio/closed-trades", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 100;
-    res.json(storage.getClosedTrades(limit));
+    res.json(await storage.getClosedTrades(limit));
   });
 
   // ============================================================
@@ -236,7 +236,7 @@ export async function registerRoutes(
   app.get("/api/performance/summary", async (_req, res) => {
     try {
       // Try trade-engine analytics first (based on actual closed trades)
-      const analytics = getPerformanceAnalytics();
+      const analytics = await getPerformanceAnalytics();
       if (analytics) {
         // If DB positions show zero unrealized P&L, try Schwab live positions
         if (analytics.totalUnrealizedPnl === 0 && analytics.openPositionCount === 0) {
@@ -257,7 +257,7 @@ export async function registerRoutes(
         return res.json(analytics);
       }
       // Fall back to snapshot-based summary
-      res.json(getPerformanceSummary());
+      res.json(await getPerformanceSummary());
     } catch (err: any) {
       console.error("[/api/performance/summary ERROR]", err.message);
       res.status(500).json({ error: err.message });
@@ -265,14 +265,14 @@ export async function registerRoutes(
   });
 
   /** Performance chart data — equity curves for strategy, user, benchmark */
-  app.get("/api/performance/chart", (req, res) => {
+  app.get("/api/performance/chart", async (req, res) => {
     const days = parseInt(req.query.days as string) || 90;
-    res.json(getPerformanceSnapshots(days));
+    res.json(await getPerformanceSnapshots(days));
   });
 
   /** Equity curve — cumulative P&L over time from closed trades */
-  app.get("/api/performance/equity-curve", (_req, res) => {
-    res.json(getEquityCurve());
+  app.get("/api/performance/equity-curve", async (_req, res) => {
+    res.json(await getEquityCurve());
   });
 
   // ============================================================
@@ -280,27 +280,27 @@ export async function registerRoutes(
   // ============================================================
 
   /** Execution analysis summary KPIs */
-  app.get("/api/execution/summary", (_req, res) => {
-    res.json(getExecutionSummary());
+  app.get("/api/execution/summary", async (_req, res) => {
+    res.json(await getExecutionSummary());
   });
 
   /** Trade-level deviations */
-  app.get("/api/execution/deviations", (req, res) => {
+  app.get("/api/execution/deviations", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 100;
-    res.json(getTradeDeviations(limit));
+    res.json(await getTradeDeviations(limit));
   });
 
   /** Missed signals — high-scoring signals the user didn't trade */
-  app.get("/api/execution/missed-signals", (req, res) => {
+  app.get("/api/execution/missed-signals", async (req, res) => {
     const days = parseInt(req.query.days as string) || 90;
     const minScore = parseInt(req.query.minScore as string) || 70;
     // Use enhanced version that filters by traded tickers and estimates alpha missed
-    const enhanced = getEnhancedMissedSignals(days, minScore);
+    const enhanced = await getEnhancedMissedSignals(days, minScore);
     if (enhanced.length > 0) {
       return res.json(enhanced);
     }
     // Fall back to original query
-    res.json(getMissedSignals(days));
+    res.json(await getMissedSignals(days));
   });
 
   // ============================================================
@@ -308,13 +308,13 @@ export async function registerRoutes(
   // ============================================================
 
   /** Data pipeline status */
-  app.get("/api/settings/pipeline-status", (_req, res) => {
-    res.json(getDataPipelineStatus());
+  app.get("/api/settings/pipeline-status", async (_req, res) => {
+    res.json(await getDataPipelineStatus());
   });
 
   /** Schwab integration status */
-  app.get("/api/schwab/status", (_req, res) => {
-    const config = storage.getSchwabConfig();
+  app.get("/api/schwab/status", async (_req, res) => {
+    const config = await storage.getSchwabConfig();
     res.json({
       isConnected: config?.isConnected || false,
       status: config?.status || "disconnected",
@@ -324,12 +324,12 @@ export async function registerRoutes(
   });
 
   /** Schwab OAuth setup */
-  app.post("/api/schwab/configure", (req, res) => {
+  app.post("/api/schwab/configure", async (req, res) => {
     const { appKey, appSecret, callbackUrl } = req.body;
     if (!appKey || !appSecret) {
       return res.status(400).json({ error: "appKey and appSecret are required" });
     }
-    storage.upsertSchwabConfig({ appKey, appSecret, status: "pending_auth" });
+    await storage.upsertSchwabConfig({ appKey, appSecret, status: "pending_auth" });
     const authUrl = `https://api.schwabapi.com/v1/oauth/authorize?client_id=${encodeURIComponent(appKey)}&redirect_uri=${encodeURIComponent(callbackUrl || "https://127.0.0.1")}&response_type=code`;
     res.json({ authUrl, message: "Visit the authorization URL to connect your Schwab account." });
   });
@@ -337,7 +337,7 @@ export async function registerRoutes(
   /** Schwab OAuth callback */
   app.post("/api/schwab/callback", async (req, res) => {
     const { code, callbackUrl } = req.body;
-    const config = storage.getSchwabConfig();
+    const config = await storage.getSchwabConfig();
     if (!config?.appKey || !config?.appSecret) {
       return res.status(400).json({ error: "Schwab not configured." });
     }
@@ -350,7 +350,7 @@ export async function registerRoutes(
       });
       if (!tokenResp.ok) return res.status(400).json({ error: `Token exchange failed: ${await tokenResp.text()}` });
       const tokens = await tokenResp.json() as any;
-      storage.upsertSchwabConfig({
+      await storage.upsertSchwabConfig({
         accessToken: tokens.access_token, refreshToken: tokens.refresh_token,
         tokenExpiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
         isConnected: true, status: "connected", lastSyncAt: new Date().toISOString(),
@@ -363,7 +363,7 @@ export async function registerRoutes(
 
   /** Refresh Schwab access token using refresh token */
   async function refreshSchwabToken(): Promise<boolean> {
-    const config = storage.getSchwabConfig();
+    const config = await storage.getSchwabConfig();
     if (!config?.refreshToken || !config?.appKey || !config?.appSecret) return false;
     try {
       const basicAuth = Buffer.from(`${config.appKey}:${config.appSecret}`).toString("base64");
@@ -377,7 +377,7 @@ export async function registerRoutes(
         return false;
       }
       const tokens = await resp.json() as any;
-      storage.upsertSchwabConfig({
+      await storage.upsertSchwabConfig({
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token || config.refreshToken,
         tokenExpiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
@@ -391,13 +391,13 @@ export async function registerRoutes(
 
   /** Get a valid Schwab access token, refreshing if expired */
   async function getSchwabAccessToken(): Promise<string | null> {
-    const config = storage.getSchwabConfig();
+    const config = await storage.getSchwabConfig();
     if (!config?.accessToken) return null;
     // Check if token is expired (with 60s buffer)
     if (config.tokenExpiresAt && new Date(config.tokenExpiresAt).getTime() < Date.now() + 60000) {
       const refreshed = await refreshSchwabToken();
       if (!refreshed) return null;
-      return storage.getSchwabConfig()?.accessToken || null;
+      return (await storage.getSchwabConfig()?.accessToken || null;
     }
     return config.accessToken;
   }
@@ -417,7 +417,7 @@ export async function registerRoutes(
         const acct = accounts[0];
         const acctNum = acct.securitiesAccount?.accountNumber || acct.accountNumber;
         if (acctNum) {
-          storage.upsertSchwabConfig({ accountNumber: acctNum, lastSyncAt: new Date().toISOString() });
+          await storage.upsertSchwabConfig({ accountNumber: acctNum, lastSyncAt: new Date().toISOString() });
         }
       }
       res.json(accounts);
@@ -452,7 +452,7 @@ export async function registerRoutes(
           });
         }
       }
-      storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
+      await storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
       res.json(positions);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -499,7 +499,7 @@ export async function registerRoutes(
         for (const pos of acctPositions) {
           const ticker = pos.instrument?.symbol;
           if (!ticker || pos.instrument?.assetType !== "EQUITY") continue;
-          storage.upsertPosition({
+          await storage.upsertPosition({
             ticker,
             quantity: pos.longQuantity - (pos.shortQuantity || 0),
             avgCostBasis: pos.averagePrice || 0,
@@ -515,11 +515,11 @@ export async function registerRoutes(
           syncedCount++;
         }
       }
-      storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
+      await storage.upsertSchwabConfig({ lastSyncAt: new Date().toISOString() });
       // Auto-compute trades after successful sync
       try {
-        const signalResult = runSignalTradeMatching();
-        const fifoResult = runFifoMatching();
+        const signalResult = await runSignalTradeMatching();
+        const fifoResult = await runFifoMatching();
         console.log(`[PIPELINE] Post-sync trade compute: ${signalResult.matched} signal matches, ${fifoResult.matched} FIFO matches`);
       } catch (e: any) {
         console.error("[PIPELINE] Post-sync trade compute failed:", e.message);
@@ -569,7 +569,7 @@ export async function registerRoutes(
           const orderId = String(order.orderId || "");
 
           // Skip if already synced
-          if (orderId && storage.getTradeExecutionByOrderId(orderId)) continue;
+          if (orderId && await storage.getTradeExecutionByOrderId(orderId)) continue;
 
           const executionDate = order.closeTime
             ? new Date(order.closeTime).toISOString().split("T")[0]
@@ -579,7 +579,7 @@ export async function registerRoutes(
             : undefined;
 
           // Create trade execution
-          const trade = storage.insertTradeExecution({
+          const trade = await storage.insertTradeExecution({
             ticker,
             companyName: leg.instrument?.description || ticker,
             side: side === "BUY" ? "BUY" : "SELL",
@@ -597,10 +597,10 @@ export async function registerRoutes(
 
           if (side === "BUY") {
             // For BUY orders, check for matching purchase signal (same ticker, signal date within 14 days before trade)
-            const matchingSignals = db.all(sql`
+            const matchingSignals = (await db.execute(sql`
               SELECT id, signal_score, signal_date FROM purchase_signals
               WHERE issuer_ticker = ${ticker}
-                AND signal_date >= date(${executionDate}, '-14 days')
+                AND signal_date >= (${executionDate}::date - interval '14 days')::text
                 AND signal_date <= ${executionDate}
               ORDER BY signal_date DESC
               LIMIT 1
@@ -613,7 +613,7 @@ export async function registerRoutes(
               const tradeDate = new Date(executionDate);
               const entryDelayDays = Math.floor((tradeDate.getTime() - signalDate.getTime()) / (1000 * 60 * 60 * 24));
 
-              storage.insertExecutionDeviation({
+              await storage.insertExecutionDeviation({
                 userTradeId: trade.id,
                 signalId: matchingSignal.id,
                 classification: "signal_aligned",
@@ -627,7 +627,7 @@ export async function registerRoutes(
                 createdAt: new Date().toISOString(),
               });
             } else {
-              storage.insertExecutionDeviation({
+              await storage.insertExecutionDeviation({
                 userTradeId: trade.id,
                 signalId: null,
                 classification: "independent",
@@ -644,7 +644,7 @@ export async function registerRoutes(
             createdDeviations++;
           } else if (side === "SELL") {
             // For SELL orders, try to match against open BUY executions to create closed trades
-            const openBuys = db.all(sql`
+            const openBuys = (await db.execute(sql`
               SELECT te.* FROM trade_executions te
               WHERE te.ticker = ${ticker}
                 AND te.side = 'BUY'
@@ -663,13 +663,13 @@ export async function registerRoutes(
               const realizedPnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
 
               // Check if the buy had a signal
-              const buyDeviation = db.all(sql`
+              const buyDeviation = (await db.execute(sql`
                 SELECT ed.classification, ed.signal_id FROM execution_deviations ed
                 WHERE ed.user_trade_id = ${matchingBuy.id}
                 LIMIT 1
               `) as any[];
 
-              storage.insertClosedTrade({
+              await storage.insertClosedTrade({
                 ticker,
                 companyName: leg.instrument?.description || ticker,
                 entryDate,
@@ -705,7 +705,7 @@ export async function registerRoutes(
   });
 
   /** Polling status */
-  app.get("/api/status", (_req, res) => {
+  app.get("/api/status", async (_req, res) => {
     res.json(getPollerStatus());
   });
 
@@ -731,7 +731,7 @@ export async function registerRoutes(
     );
   });
 
-  app.get("/api/admin/health", (req, res) => {
+  app.get("/api/admin/health", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -748,16 +748,14 @@ export async function registerRoutes(
 
 
   // Admin: create database indexes for performance
-  app.post("/api/admin/create-indexes", (req, res) => {
+  app.post("/api/admin/create-indexes", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
-    const { exec, execSync } = require("child_process");
     try {
-      const DB = "/opt/insider-signal-dash/data.db";
-      // Phase 1: Critical indexes (fast, sync)
-      execSync(`sqlite3 ${DB} "
+      // Phase 1: Critical indexes
+      await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_tx_type_filing_date ON insider_transactions(transaction_type, filing_date);
         CREATE INDEX IF NOT EXISTS idx_tx_accession ON insider_transactions(accession_number);
         CREATE INDEX IF NOT EXISTS idx_tx_ticker ON insider_transactions(issuer_ticker);
@@ -768,19 +766,17 @@ export async function registerRoutes(
         CREATE INDEX IF NOT EXISTS idx_factor_analysis_factor ON factor_analysis(factor_name, horizon);
         CREATE INDEX IF NOT EXISTS idx_exec_deviations_signal ON execution_deviations(signal_id);
         CREATE INDEX IF NOT EXISTS idx_exec_deviations_trade ON execution_deviations(user_trade_id);
-      "`, { timeout: 120000 });
-      const indexCount = execSync(`sqlite3 ${DB} "SELECT count(*) FROM sqlite_master WHERE type='index';"`, { timeout: 10000 }).toString().trim();
+      `);
+      const { rows } = await pool.query("SELECT count(*) as c FROM pg_indexes WHERE schemaname = 'public'");
       
       // Phase 2: Expensive indexes (async, non-blocking)
-      exec(`sqlite3 ${DB} "
+      pool.query(`
         CREATE INDEX IF NOT EXISTS idx_fwd_returns_signal_day ON daily_forward_returns(signal_id, trading_day);
         CREATE INDEX IF NOT EXISTS idx_fwd_returns_day ON daily_forward_returns(trading_day);
-      "`, { timeout: 600000 }, (err: any) => {
-        if (err) console.error("[INDEXES] Forward return indexes failed:", err.message);
-        else console.log("[INDEXES] Forward return indexes created");
-      });
+      `).then(() => console.log("[INDEXES] Forward return indexes created"))
+        .catch((err: any) => console.error("[INDEXES] Forward return indexes failed:", err.message));
       
-      res.json({ status: "core_indexes_created", totalIndexes: indexCount, note: "Forward return indexes creating in background" });
+      res.json({ status: "core_indexes_created", totalIndexes: rows[0]?.c, note: "Forward return indexes creating in background" });
     } catch (err: any) {
       res.json({ error: err.message });
     }
@@ -792,17 +788,7 @@ export async function registerRoutes(
 
   let lastEnrichedCount = 0;
 
-  let enrichBatchCount = 0;
 
-  function walCheckpoint() {
-    try {
-      const { execSync } = require("child_process");
-      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(PASSIVE);"', { timeout: 120000 });
-      console.log("[DB] WAL checkpoint completed");
-    } catch (e: any) {
-      console.error("[DB] WAL checkpoint failed:", e.message);
-    }
-  }
 
   function runEnrichmentBatch() {
     const { exec } = require("child_process");
@@ -816,14 +802,12 @@ export async function registerRoutes(
         if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
 
         // Checkpoint WAL every 3 batches to prevent unbounded WAL growth
-        enrichBatchCount++;
-        if (enrichBatchCount % 3 === 0) walCheckpoint();
-
+        
         // If continuous mode is on, schedule next batch (retry even on error)
         if (enrichmentContinuous) {
           // Invalidate pipeline status cache to get fresh counts after enrichment
           invalidatePipelineStatusCache();
-          const status = getDataPipelineStatus();
+          const status = await getDataPipelineStatus();
           const currentEnriched = status.enrichedSignals || 0;
 
           // Stop if script found 0 signals to enrich, or no progress since last batch
@@ -835,7 +819,6 @@ export async function registerRoutes(
             enrichmentContinuous = false;
             // Auto-chain: run factor research after enrichment completes
             // Checkpoint WAL before factor research to ensure disk space is available
-            walCheckpoint();
             console.log("[PIPELINE] Enrichment complete. Auto-starting factor research...");
             const { exec: execFR } = require("child_process");
             execFR("nice -n 10 python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
@@ -860,7 +843,7 @@ export async function registerRoutes(
     );
   }
 
-  app.post("/api/admin/enrich", (req, res) => {
+  app.post("/api/admin/enrich", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -890,7 +873,7 @@ export async function registerRoutes(
   });
 
   // Admin: backfill SEC data
-  app.post("/api/admin/backfill", (req, res) => {
+  app.post("/api/admin/backfill", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -908,22 +891,22 @@ export async function registerRoutes(
   });
 
   // Admin: run FIFO trade matching + signal matching
-  app.post("/api/admin/compute-trades", (req, res) => {
+  app.post("/api/admin/compute-trades", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
     try {
       // Step 1: Run signal-trade matching (update execution_deviations)
-      const signalResult = runSignalTradeMatching();
+      const signalResult = await runSignalTradeMatching();
       console.log(`[COMPUTE] Signal matching: ${signalResult.matched} matched, ${signalResult.unmatched} unmatched`);
 
       // Step 2: Run FIFO closed trade matching
-      const fifoResult = runFifoMatching();
+      const fifoResult = await runFifoMatching();
       console.log(`[COMPUTE] FIFO matching: ${fifoResult.matched} closed trades created`);
 
       // Step 3: Get performance summary
-      const perf = getPerformanceAnalytics();
+      const perf = await getPerformanceAnalytics();
 
       res.json({
         status: "completed",
@@ -943,7 +926,7 @@ export async function registerRoutes(
   });
 
   // Admin: run factor research
-  app.post("/api/admin/factor-research", (req, res) => {
+  app.post("/api/admin/factor-research", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -975,7 +958,7 @@ export async function registerRoutes(
   });
 
   // Admin: backup database to GCS
-  app.post("/api/admin/backup", (req, res) => {
+  app.post("/api/admin/backup", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -983,15 +966,15 @@ export async function registerRoutes(
     const { exec } = require("child_process");
     const backupScript = [
       'set -e',
-      'sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db"',
+      'pg_dump -U postgres -h localhost insider_signal > /tmp/insider-signal-backup.sql',
       'FSIZE=$(stat -c%s /tmp/insider-signal-backup.db)',
       'echo "STEP1: SQLite backup done, bytes=$FSIZE"',
       'TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)[\'access_token\'])")',
       'echo "STEP2: Got token"',
       'DEST="backups/data-$(date +%Y%m%d-%H%M%S).db"',
-      'HTTP_CODE=$(curl -s -o /tmp/gcs-response.json -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST")',
+      'HTTP_CODE=$(curl -s -o /tmp/gcs-response.json -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.sql "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST")',
       'echo "STEP3: HTTP $HTTP_CODE response: $(cat /tmp/gcs-response.json)"',
-      'rm -f /tmp/insider-signal-backup.db /tmp/gcs-response.json',
+      'rm -f /tmp/insider-signal-backup.sql /tmp/gcs-response.json',
       'if [ "$HTTP_CODE" != "200" ]; then echo "FAILED: Upload returned HTTP $HTTP_CODE"; exit 1; fi',
       'echo "DONE: Backed up to gs://insider-signal-deploys/$DEST"',
     ].join('\n');
@@ -1007,7 +990,7 @@ export async function registerRoutes(
   });
 
   // Admin: test GCS access (diagnostic)
-  app.get("/api/admin/test-gcs", (req, res) => {
+  app.get("/api/admin/test-gcs", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -1031,7 +1014,7 @@ export async function registerRoutes(
   });
 
   // Admin: read recent service logs
-  app.get("/api/admin/logs", (req, res) => {
+  app.get("/api/admin/logs", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -1050,7 +1033,7 @@ export async function registerRoutes(
   });
 
   // Admin: setup systemd override for index creation on restart
-  app.post("/api/admin/setup-systemd", (req, res) => {
+  app.post("/api/admin/setup-systemd", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -1072,7 +1055,7 @@ systemctl daemon-reload`,
   });
 
   // Admin: fix deploy cron script
-  app.post("/api/admin/fix-deploy-cron", (req, res) => {
+  app.post("/api/admin/fix-deploy-cron", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -1105,17 +1088,19 @@ chmod +x /opt/deploy.sh`,
   });
 
   // Admin: database cleanup
-  app.post("/api/admin/cleanup", (req, res) => {
+  app.post("/api/admin/cleanup", async (req, res) => {
     const secret = req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
     const { execSync } = require("child_process");
     try {
-      const before = execSync("sqlite3 /opt/insider-signal-dash/data.db \"SELECT count(*) FROM insider_transactions WHERE transaction_type='P';\"").toString().trim();
-      execSync("sqlite3 /opt/insider-signal-dash/data.db \"DELETE FROM insider_transactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM insider_transactions GROUP BY accession_number, reporting_person_cik, transaction_date, shares_traded);\"", { timeout: 120000 });
-      execSync("sqlite3 /opt/insider-signal-dash/data.db \"DELETE FROM purchase_signals WHERE rowid NOT IN (SELECT MIN(rowid) FROM purchase_signals GROUP BY issuer_ticker, signal_date);\"", { timeout: 120000 });
-      const after = execSync("sqlite3 /opt/insider-signal-dash/data.db \"SELECT count(*) FROM insider_transactions WHERE transaction_type='P';\"").toString().trim();
+      const beforeResult = await pool.query("SELECT count(*) as c FROM insider_transactions WHERE transaction_type='P'");
+      const before = beforeResult.rows[0]?.c;
+      await pool.query("DELETE FROM insider_transactions WHERE id NOT IN (SELECT MIN(id) FROM insider_transactions GROUP BY accession_number, reporting_person_cik, transaction_date, shares_traded)");
+      await pool.query("DELETE FROM purchase_signals WHERE id NOT IN (SELECT MIN(id) FROM purchase_signals GROUP BY issuer_ticker, signal_date)");
+      const afterResult = await pool.query("SELECT count(*) as c FROM insider_transactions WHERE transaction_type='P'");
+      const after = afterResult.rows[0]?.c;
       res.json({ before, after, status: "cleaned" });
     } catch (err: any) {
       res.json({ error: err.message });
@@ -1137,7 +1122,7 @@ chmod +x /opt/deploy.sh`,
   }, 10000);
 
   // Health check endpoint for external monitoring (no auth required)
-  app.get("/api/ping", (_req, res) => {
+  app.get("/api/ping", async (_req, res) => {
     res.json({ ok: true, uptime: process.uptime(), lag: Date.now() - lastHeartbeat });
   });
 
@@ -1148,8 +1133,8 @@ chmod +x /opt/deploy.sh`,
   // Auto-resume continuous enrichment on server startup after a 30s delay
   setTimeout(() => {
     try {
-      invalidatePipelineStatusCache();
-      const status = getDataPipelineStatus();
+      await invalidatePipelineStatusCache();
+      const status = await getDataPipelineStatus();
       const progress = status.enrichmentProgress ?? 0;
       if (progress < 100) {
         console.log(`[ENRICH] Auto-resuming continuous enrichment on startup (current: ${progress}%)`);
@@ -1171,11 +1156,11 @@ chmod +x /opt/deploy.sh`,
     const { exec } = require("child_process");
     const backupScript = [
       'set -e',
-      'sqlite3 /opt/insider-signal-dash/data.db ".backup /tmp/insider-signal-backup.db"',
+      'pg_dump -U postgres -h localhost insider_signal > /tmp/insider-signal-backup.sql',
       'TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json;print(json.load(sys.stdin)[\'access_token\'])")',
       'DEST="backups/data-$(date +%Y%m%d-%H%M%S).db"',
-      'curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.db "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST" | grep -q 200 && echo "[BACKUP] Success: $DEST" || echo "[BACKUP] Failed"',
-      'rm -f /tmp/insider-signal-backup.db',
+      'curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary @/tmp/insider-signal-backup.sql "https://storage.googleapis.com/upload/storage/v1/b/insider-signal-deploys/o?uploadType=media&name=$DEST" | grep -q 200 && echo "[BACKUP] Success: $DEST" || echo "[BACKUP] Failed"',
+      'rm -f /tmp/insider-signal-backup.sql',
     ].join('\n');
     exec(backupScript, { timeout: 300000, shell: "/bin/bash" }, (error: any, stdout: string, stderr: string) => {
       if (error) console.error("[BACKUP] Scheduled backup failed:", error.message);
@@ -1190,13 +1175,13 @@ chmod +x /opt/deploy.sh`,
   console.log("[BACKUP] Daily backup scheduled (first run in 5 minutes)");
 
   // Comprehensive system health endpoint
-  app.get("/api/admin/system-health", (req, res) => {
+  app.get("/api/admin/system-health", async (req, res) => {
     const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
-    const status = getDataPipelineStatus();
+    const status = await getDataPipelineStatus();
 
     let pollerStatus: any = { status: "unknown" };
     try {
@@ -1248,7 +1233,7 @@ chmod +x /opt/deploy.sh`,
   });
 
   // Admin: disk cleanup — remove SEC raw data files (already imported into DB)
-  app.post("/api/admin/disk-cleanup", (req, res) => {
+  app.post("/api/admin/disk-cleanup", async (req, res) => {
     const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -1259,7 +1244,7 @@ chmod +x /opt/deploy.sh`,
       // Remove SEC raw data (zip files and extracted TSVs)
       execSync("rm -rf /opt/insider-signal-dash/data/sec-raw/*", { timeout: 30000 });
       // VACUUM the database to reclaim space from deleted rows
-      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 180000 });
+      execSync('PGPASSWORD="" psql -U postgres -h localhost -d insider_signal -c "VACUUM;"', { timeout: 180000 });
       const after = execSync("df / | tail -1").toString().trim().split(/\s+/);
       const freedKB = parseInt(after[3]) - parseInt(before[3]);
       res.json({ status: "cleanup_complete", freedMB: Math.round(freedKB / 1024), diskBefore: before[4], diskAfter: after[4], availableAfter: after[3] + "K" });
@@ -1269,7 +1254,7 @@ chmod +x /opt/deploy.sh`,
   });
 
   // Admin: run arbitrary shell command (DANGEROUS — admin only)
-  app.post("/api/admin/shell", (req, res) => {
+  app.post("/api/admin/shell", async (req, res) => {
     const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.headers["x-deploy-secret"] || req.query.secret;
     if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
       return res.status(401).json({ error: "unauthorized" });

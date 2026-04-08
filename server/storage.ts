@@ -26,77 +26,77 @@ import {
   type ExecutionDeviation,
 } from "@shared/schema";
 import { eq, desc, sql, and, gte, lte, count, asc } from "drizzle-orm";
-import { db, sqlite } from "./db";
+import { db, pool } from "./db";
 
 export interface IStorage {
   // Transactions
-  insertTransaction(tx: InsertTransaction): InsiderTransaction;
-  getTransactions(limit?: number, offset?: number): InsiderTransaction[];
-  getPurchaseTransactions(limit?: number, days?: number): InsiderTransaction[];
-  getTransactionByAccession(accessionNumber: string): InsiderTransaction | undefined;
-  getTransactionCount(): number;
-  getPurchaseCount(days?: number): number;
-  getRecentPurchaseVolume(days: number): number;
-  getTopBuyers(days?: number, limit?: number): { name: string; title: string; ticker: string; totalValue: number; count: number }[];
-  getDailyPurchaseVolume(days: number): { date: string; volume: number; count: number }[];
+  insertTransaction(tx: InsertTransaction): Promise<InsiderTransaction>;
+  getTransactions(limit?: number, offset?: number): Promise<InsiderTransaction[]>;
+  getPurchaseTransactions(limit?: number, days?: number): Promise<InsiderTransaction[]>;
+  getTransactionByAccession(accessionNumber: string): Promise<InsiderTransaction | undefined>;
+  getTransactionCount(): Promise<number>;
+  getPurchaseCount(days?: number): Promise<number>;
+  getRecentPurchaseVolume(days: number): Promise<number>;
+  getTopBuyers(days?: number, limit?: number): Promise<{ name: string; title: string; ticker: string; totalValue: number; count: number }[]>;
+  getDailyPurchaseVolume(days: number): Promise<{ date: string; volume: number; count: number }[]>;
   
   // Signals
-  insertSignal(signal: InsertSignal): PurchaseSignal;
-  getSignals(limit?: number): PurchaseSignal[];
-  getTopSignals(limit?: number): PurchaseSignal[];
+  insertSignal(signal: InsertSignal): Promise<PurchaseSignal>;
+  getSignals(limit?: number): Promise<PurchaseSignal[]>;
+  getTopSignals(limit?: number): Promise<PurchaseSignal[]>;
   
   // Polling state
-  getPollingState(): PollingState | undefined;
-  updatePollingState(lastPolledAt: string, lastAccession?: string, totalProcessed?: number): void;
+  getPollingState(): Promise<PollingState | undefined>;
+  updatePollingState(lastPolledAt: string, lastAccession?: string, totalProcessed?: number): Promise<void>;
   
   // Analytics
-  getSectorBreakdown(days?: number): { ticker: string; name: string; totalValue: number; count: number }[];
-  getInsiderTypeBreakdown(days?: number): { type: string; count: number; totalValue: number }[];
-  getClusterBuys(days?: number): { ticker: string; name: string; insiderCount: number; totalValue: number; avgPrice: number; dates: string }[];
+  getSectorBreakdown(days?: number): Promise<{ ticker: string; name: string; totalValue: number; count: number }[]>;
+  getInsiderTypeBreakdown(days?: number): Promise<{ type: string; count: number; totalValue: number }[]>;
+  getClusterBuys(days?: number): Promise<{ ticker: string; name: string; insiderCount: number; totalValue: number; avgPrice: number; dates: string }[]>;
 
   // V2: Trade Executions
-  insertTradeExecution(trade: InsertTradeExecution): TradeExecution;
-  getTradeExecutions(limit?: number): TradeExecution[];
-  getTradeExecutionsByTicker(ticker: string): TradeExecution[];
+  insertTradeExecution(trade: InsertTradeExecution): Promise<TradeExecution>;
+  getTradeExecutions(limit?: number): Promise<TradeExecution[]>;
+  getTradeExecutionsByTicker(ticker: string): Promise<TradeExecution[]>;
 
   // V2: Portfolio Positions
-  upsertPosition(pos: InsertPosition): PortfolioPosition;
-  getPositions(): PortfolioPosition[];
-  getPositionByTicker(ticker: string): PortfolioPosition | undefined;
-  deletePosition(ticker: string): void;
+  upsertPosition(pos: InsertPosition): Promise<PortfolioPosition>;
+  getPositions(): Promise<PortfolioPosition[]>;
+  getPositionByTicker(ticker: string): Promise<PortfolioPosition | undefined>;
+  deletePosition(ticker: string): Promise<void>;
 
   // V2: Strategy Snapshots
-  insertSnapshot(snap: InsertSnapshot): StrategySnapshot;
-  getSnapshots(days?: number): StrategySnapshot[];
-  getLatestSnapshot(): StrategySnapshot | undefined;
+  insertSnapshot(snap: InsertSnapshot): Promise<StrategySnapshot>;
+  getSnapshots(days?: number): Promise<StrategySnapshot[]>;
+  getLatestSnapshot(): Promise<StrategySnapshot | undefined>;
 
   // V2: Closed Trades
-  insertClosedTrade(trade: InsertClosedTrade): ClosedTrade;
-  getClosedTrades(limit?: number): ClosedTrade[];
+  insertClosedTrade(trade: InsertClosedTrade): Promise<ClosedTrade>;
+  getClosedTrades(limit?: number): Promise<ClosedTrade[]>;
 
   // V2: Execution Deviations
-  insertExecutionDeviation(dev: InsertDeviation): ExecutionDeviation;
-  getTradeExecutionByOrderId(orderId: string): TradeExecution | undefined;
+  insertExecutionDeviation(dev: InsertDeviation): Promise<ExecutionDeviation>;
+  getTradeExecutionByOrderId(orderId: string): Promise<TradeExecution | undefined>;
 
   // V2: Schwab Config
-  getSchwabConfig(): SchwabConfig | undefined;
-  upsertSchwabConfig(config: Partial<SchwabConfig>): void;
+  getSchwabConfig(): Promise<SchwabConfig | undefined>;
+  upsertSchwabConfig(config: Partial<SchwabConfig>): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
-  insertTransaction(tx: InsertTransaction): InsiderTransaction {
-    return db.insert(insiderTransactions).values(tx).returning().get();
+  async insertTransaction(tx: InsertTransaction): Promise<InsiderTransaction> {
+    const rows = await db.insert(insiderTransactions).values(tx).returning();
+    return rows[0];
   }
 
-  getTransactions(limit = 100, offset = 0): InsiderTransaction[] {
+  async getTransactions(limit = 100, offset = 0): Promise<InsiderTransaction[]> {
     return db.select().from(insiderTransactions)
       .orderBy(desc(insiderTransactions.filingDate))
       .limit(limit)
-      .offset(offset)
-      .all();
+      .offset(offset);
   }
 
-  getPurchaseTransactions(limit = 100, days = 30): InsiderTransaction[] {
+  async getPurchaseTransactions(limit = 100, days = 30): Promise<InsiderTransaction[]> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
@@ -106,51 +106,48 @@ export class DatabaseStorage implements IStorage {
         gte(insiderTransactions.filingDate, cutoffStr)
       ))
       .orderBy(desc(insiderTransactions.filingDate))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getTransactionByAccession(accessionNumber: string): InsiderTransaction | undefined {
-    return db.select().from(insiderTransactions)
-      .where(eq(insiderTransactions.accessionNumber, accessionNumber))
-      .get();
+  async getTransactionByAccession(accessionNumber: string): Promise<InsiderTransaction | undefined> {
+    const rows = await db.select().from(insiderTransactions)
+      .where(eq(insiderTransactions.accessionNumber, accessionNumber));
+    return rows[0];
   }
 
-  getTransactionCount(): number {
-    const result = db.select({ count: count() }).from(insiderTransactions).get();
-    return result?.count ?? 0;
+  async getTransactionCount(): Promise<number> {
+    const result = await db.select({ count: count() }).from(insiderTransactions);
+    return result[0]?.count ?? 0;
   }
 
-  getPurchaseCount(days = 30): number {
+  async getPurchaseCount(days = 30): Promise<number> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
-    const result = db.select({ count: count() }).from(insiderTransactions)
+    const result = await db.select({ count: count() }).from(insiderTransactions)
       .where(and(
         eq(insiderTransactions.transactionType, "P"),
         gte(insiderTransactions.filingDate, cutoffStr)
-      ))
-      .get();
-    return result?.count ?? 0;
+      ));
+    return result[0]?.count ?? 0;
   }
 
-  getRecentPurchaseVolume(days: number): number {
+  async getRecentPurchaseVolume(days: number): Promise<number> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
     // Cap individual transaction values at $500M to filter SEC data outliers
-    const result = db.select({
+    const result = await db.select({
       total: sql<number>`COALESCE(SUM(CASE WHEN ${insiderTransactions.totalValue} <= 500000000 THEN ${insiderTransactions.totalValue} ELSE 0 END), 0)`
     }).from(insiderTransactions)
       .where(and(
         eq(insiderTransactions.transactionType, "P"),
         gte(insiderTransactions.filingDate, cutoffStr)
-      ))
-      .get();
-    return result?.total ?? 0;
+      ));
+    return result[0]?.total ?? 0;
   }
 
-  getTopBuyers(days = 30, limit = 10) {
+  async getTopBuyers(days = 30, limit = 10) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
@@ -167,11 +164,10 @@ export class DatabaseStorage implements IStorage {
       ))
       .groupBy(insiderTransactions.reportingPersonName)
       .orderBy(sql`SUM(${insiderTransactions.totalValue}) DESC`)
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getDailyPurchaseVolume(days: number) {
+  async getDailyPurchaseVolume(days: number) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
@@ -185,54 +181,52 @@ export class DatabaseStorage implements IStorage {
         gte(insiderTransactions.filingDate, cutoffStr)
       ))
       .groupBy(insiderTransactions.filingDate)
-      .orderBy(insiderTransactions.filingDate)
-      .all();
+      .orderBy(insiderTransactions.filingDate);
   }
 
-  insertSignal(signal: InsertSignal): PurchaseSignal {
-    return db.insert(purchaseSignals).values(signal).returning().get();
+  async insertSignal(signal: InsertSignal): Promise<PurchaseSignal> {
+    const rows = await db.insert(purchaseSignals).values(signal).returning();
+    return rows[0];
   }
 
-  getSignals(limit = 50): PurchaseSignal[] {
+  async getSignals(limit = 50): Promise<PurchaseSignal[]> {
     return db.select().from(purchaseSignals)
       .orderBy(desc(purchaseSignals.signalDate))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getTopSignals(limit = 20): PurchaseSignal[] {
+  async getTopSignals(limit = 20): Promise<PurchaseSignal[]> {
     return db.select().from(purchaseSignals)
       .orderBy(desc(purchaseSignals.signalScore))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getPollingState(): PollingState | undefined {
-    return db.select().from(pollingState).get();
+  async getPollingState(): Promise<PollingState | undefined> {
+    const rows = await db.select().from(pollingState);
+    return rows[0];
   }
 
-  updatePollingState(lastPolledAt: string, lastAccession?: string, totalProcessed?: number): void {
-    const existing = this.getPollingState();
+  async updatePollingState(lastPolledAt: string, lastAccession?: string, totalProcessed?: number): Promise<void> {
+    const existing = await this.getPollingState();
     if (existing) {
-      db.update(pollingState)
+      await db.update(pollingState)
         .set({
           lastPolledAt,
           ...(lastAccession ? { lastAccessionNumber: lastAccession } : {}),
           ...(totalProcessed !== undefined ? { totalFilingsProcessed: totalProcessed } : {}),
         })
-        .where(eq(pollingState.id, existing.id))
-        .run();
+        .where(eq(pollingState.id, existing.id));
     } else {
-      db.insert(pollingState).values({
+      await db.insert(pollingState).values({
         lastPolledAt,
         lastAccessionNumber: lastAccession ?? null,
         totalFilingsProcessed: totalProcessed ?? 0,
         status: "active",
-      }).run();
+      });
     }
   }
 
-  getSectorBreakdown(days = 30) {
+  async getSectorBreakdown(days = 30) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
@@ -248,20 +242,19 @@ export class DatabaseStorage implements IStorage {
       ))
       .groupBy(insiderTransactions.issuerTicker)
       .orderBy(sql`SUM(${insiderTransactions.totalValue}) DESC`)
-      .limit(20)
-      .all();
+      .limit(20);
   }
 
-  getInsiderTypeBreakdown(days = 30) {
+  async getInsiderTypeBreakdown(days = 30) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
     return db.select({
       type: sql<string>`
         CASE 
-          WHEN ${insiderTransactions.isOfficer} = 1 THEN 'Officer'
-          WHEN ${insiderTransactions.isDirector} = 1 THEN 'Director'
-          WHEN ${insiderTransactions.isTenPercentOwner} = 1 THEN '10%+ Owner'
+          WHEN ${insiderTransactions.isOfficer} = true THEN 'Officer'
+          WHEN ${insiderTransactions.isDirector} = true THEN 'Director'
+          WHEN ${insiderTransactions.isTenPercentOwner} = true THEN '10%+ Owner'
           ELSE 'Other'
         END`,
       count: count(),
@@ -272,15 +265,14 @@ export class DatabaseStorage implements IStorage {
         gte(insiderTransactions.filingDate, cutoffStr)
       ))
       .groupBy(sql`CASE 
-        WHEN ${insiderTransactions.isOfficer} = 1 THEN 'Officer'
-        WHEN ${insiderTransactions.isDirector} = 1 THEN 'Director'
-        WHEN ${insiderTransactions.isTenPercentOwner} = 1 THEN '10%+ Owner'
+        WHEN ${insiderTransactions.isOfficer} = true THEN 'Officer'
+        WHEN ${insiderTransactions.isDirector} = true THEN 'Director'
+        WHEN ${insiderTransactions.isTenPercentOwner} = true THEN '10%+ Owner'
         ELSE 'Other'
-      END`)
-      .all();
+      END`);
   }
 
-  getClusterBuys(days = 30) {
+  async getClusterBuys(days = 30) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
@@ -299,36 +291,34 @@ export class DatabaseStorage implements IStorage {
       .groupBy(insiderTransactions.issuerTicker)
       .having(sql`COUNT(DISTINCT ${insiderTransactions.reportingPersonName}) >= 2`)
       .orderBy(sql`COUNT(DISTINCT ${insiderTransactions.reportingPersonName}) DESC`)
-      .limit(20)
-      .all();
+      .limit(20);
   }
 
   // ========== V2: Trade Executions ==========
 
-  insertTradeExecution(trade: InsertTradeExecution): TradeExecution {
-    return db.insert(tradeExecutions).values(trade).returning().get();
+  async insertTradeExecution(trade: InsertTradeExecution): Promise<TradeExecution> {
+    const rows = await db.insert(tradeExecutions).values(trade).returning();
+    return rows[0];
   }
 
-  getTradeExecutions(limit = 100): TradeExecution[] {
+  async getTradeExecutions(limit = 100): Promise<TradeExecution[]> {
     return db.select().from(tradeExecutions)
       .orderBy(desc(tradeExecutions.executionDate))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getTradeExecutionsByTicker(ticker: string): TradeExecution[] {
+  async getTradeExecutionsByTicker(ticker: string): Promise<TradeExecution[]> {
     return db.select().from(tradeExecutions)
       .where(eq(tradeExecutions.ticker, ticker))
-      .orderBy(desc(tradeExecutions.executionDate))
-      .all();
+      .orderBy(desc(tradeExecutions.executionDate));
   }
 
   // ========== V2: Portfolio Positions ==========
 
-  upsertPosition(pos: InsertPosition): PortfolioPosition {
-    const existing = this.getPositionByTicker(pos.ticker);
+  async upsertPosition(pos: InsertPosition): Promise<PortfolioPosition> {
+    const existing = await this.getPositionByTicker(pos.ticker);
     if (existing) {
-      db.update(portfolioPositions)
+      await db.update(portfolioPositions)
         .set({
           quantity: pos.quantity,
           avgCostBasis: pos.avgCostBasis,
@@ -342,97 +332,96 @@ export class DatabaseStorage implements IStorage {
           lastSyncedAt: pos.lastSyncedAt ?? existing.lastSyncedAt,
           source: pos.source ?? existing.source,
         })
-        .where(eq(portfolioPositions.ticker, pos.ticker))
-        .run();
-      return this.getPositionByTicker(pos.ticker)!;
+        .where(eq(portfolioPositions.ticker, pos.ticker));
+      return (await this.getPositionByTicker(pos.ticker))!;
     }
-    return db.insert(portfolioPositions).values(pos).returning().get();
+    const rows = await db.insert(portfolioPositions).values(pos).returning();
+    return rows[0];
   }
 
-  getPositions(): PortfolioPosition[] {
+  async getPositions(): Promise<PortfolioPosition[]> {
     return db.select().from(portfolioPositions)
-      .orderBy(desc(portfolioPositions.marketValue))
-      .all();
+      .orderBy(desc(portfolioPositions.marketValue));
   }
 
-  getPositionByTicker(ticker: string): PortfolioPosition | undefined {
-    return db.select().from(portfolioPositions)
-      .where(eq(portfolioPositions.ticker, ticker))
-      .get();
+  async getPositionByTicker(ticker: string): Promise<PortfolioPosition | undefined> {
+    const rows = await db.select().from(portfolioPositions)
+      .where(eq(portfolioPositions.ticker, ticker));
+    return rows[0];
   }
 
-  deletePosition(ticker: string): void {
-    db.delete(portfolioPositions)
-      .where(eq(portfolioPositions.ticker, ticker))
-      .run();
+  async deletePosition(ticker: string): Promise<void> {
+    await db.delete(portfolioPositions)
+      .where(eq(portfolioPositions.ticker, ticker));
   }
 
   // ========== V2: Strategy Snapshots ==========
 
-  insertSnapshot(snap: InsertSnapshot): StrategySnapshot {
-    return db.insert(strategySnapshots).values(snap).returning().get();
+  async insertSnapshot(snap: InsertSnapshot): Promise<StrategySnapshot> {
+    const rows = await db.insert(strategySnapshots).values(snap).returning();
+    return rows[0];
   }
 
-  getSnapshots(days = 90): StrategySnapshot[] {
+  async getSnapshots(days = 90): Promise<StrategySnapshot[]> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffStr = cutoff.toISOString().split("T")[0];
     return db.select().from(strategySnapshots)
       .where(gte(strategySnapshots.date, cutoffStr))
-      .orderBy(asc(strategySnapshots.date))
-      .all();
+      .orderBy(asc(strategySnapshots.date));
   }
 
-  getLatestSnapshot(): StrategySnapshot | undefined {
-    return db.select().from(strategySnapshots)
+  async getLatestSnapshot(): Promise<StrategySnapshot | undefined> {
+    const rows = await db.select().from(strategySnapshots)
       .orderBy(desc(strategySnapshots.date))
-      .limit(1)
-      .get();
+      .limit(1);
+    return rows[0];
   }
 
   // ========== V2: Closed Trades ==========
 
-  insertClosedTrade(trade: InsertClosedTrade): ClosedTrade {
-    return db.insert(closedTrades).values(trade).returning().get();
+  async insertClosedTrade(trade: InsertClosedTrade): Promise<ClosedTrade> {
+    const rows = await db.insert(closedTrades).values(trade).returning();
+    return rows[0];
   }
 
-  getClosedTrades(limit = 100): ClosedTrade[] {
+  async getClosedTrades(limit = 100): Promise<ClosedTrade[]> {
     return db.select().from(closedTrades)
       .orderBy(desc(closedTrades.exitDate))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
   // ========== V2: Execution Deviations ==========
 
-  insertExecutionDeviation(dev: InsertDeviation): ExecutionDeviation {
-    return db.insert(executionDeviations).values(dev).returning().get();
+  async insertExecutionDeviation(dev: InsertDeviation): Promise<ExecutionDeviation> {
+    const rows = await db.insert(executionDeviations).values(dev).returning();
+    return rows[0];
   }
 
-  getTradeExecutionByOrderId(orderId: string): TradeExecution | undefined {
-    return db.select().from(tradeExecutions)
-      .where(eq(tradeExecutions.orderId, orderId))
-      .get();
+  async getTradeExecutionByOrderId(orderId: string): Promise<TradeExecution | undefined> {
+    const rows = await db.select().from(tradeExecutions)
+      .where(eq(tradeExecutions.orderId, orderId));
+    return rows[0];
   }
 
   // ========== V2: Schwab Config ==========
 
-  getSchwabConfig(): SchwabConfig | undefined {
-    return db.select().from(schwabConfig).get();
+  async getSchwabConfig(): Promise<SchwabConfig | undefined> {
+    const rows = await db.select().from(schwabConfig);
+    return rows[0];
   }
 
-  upsertSchwabConfig(config: Partial<SchwabConfig>): void {
-    const existing = this.getSchwabConfig();
+  async upsertSchwabConfig(config: Partial<SchwabConfig>): Promise<void> {
+    const existing = await this.getSchwabConfig();
     if (existing) {
-      db.update(schwabConfig)
+      await db.update(schwabConfig)
         .set(config as any)
-        .where(eq(schwabConfig.id, existing.id))
-        .run();
+        .where(eq(schwabConfig.id, existing.id));
     } else {
-      db.insert(schwabConfig).values({
+      await db.insert(schwabConfig).values({
         ...config,
         createdAt: new Date().toISOString(),
-      } as any).run();
+      } as any);
     }
   }
 }

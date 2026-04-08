@@ -2,23 +2,29 @@
  * Standalone EDGAR Poller Process
  *
  * Runs separately from the web server to avoid blocking the event loop.
- * Connects to the same data.db with WAL mode for concurrent read/write.
+ * Connects to the same PostgreSQL database for concurrent read/write.
  */
 
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
 import { startV3Polling, stopV3Polling } from "./edgar-poller-v3";
 
-// Create own SQLite connection (same settings as db.ts)
-const sqlite = new Database("data.db");
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("busy_timeout = 30000");
-sqlite.pragma("cache_size = -20000"); // 20MB cache
+// Create own PostgreSQL connection pool (same settings as db.ts)
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL || "postgresql://postgres@localhost:5432/insider_signal",
+  max: 5, // Poller needs fewer connections than main server
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
 
-const db = drizzle(sqlite);
+pool.on("error", (err) => {
+  console.error("[POLLER] Unexpected pool error:", err.message);
+});
+
+const db = drizzle(pool);
 
 console.log("[POLLER] Standalone EDGAR poller starting...");
-console.log("[POLLER] Connected to data.db (WAL mode, busy_timeout=30s)");
+console.log("[POLLER] Connected to PostgreSQL (insider_signal)");
 
 // Start polling with our own db connection
 startV3Polling(db);
@@ -27,8 +33,7 @@ startV3Polling(db);
 function shutdown() {
   console.log("[POLLER] Shutting down...");
   stopV3Polling();
-  sqlite.close();
-  process.exit(0);
+  pool.end().then(() => process.exit(0));
 }
 
 process.on("SIGTERM", shutdown);

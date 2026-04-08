@@ -24,7 +24,7 @@
 import { insiderTransactions, purchaseSignals } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
 import type { InsertTransaction } from "@shared/schema";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { writeFileSync } from "fs";
 
 const SEC_USER_AGENT = "InsiderSignalDash research@insidersignal.app";
@@ -58,7 +58,7 @@ const TOP_FILING_AGENTS = [
 const C_SUITE_KEYWORDS = ["CEO", "CFO", "COO", "CTO", "CIO", "Chief", "President", "Chairman"];
 
 // Injected database reference (set by startV3Polling)
-let _db: BetterSQLite3Database | null = null;
+let _db: NodePgDatabase | null = null;
 
 // State tracking
 let seenAccessions = new Set<string>();
@@ -188,15 +188,14 @@ async function pollPredictions(): Promise<string[]> {
   let lastSeq = agentSequences.get(agent.cik);
   if (!lastSeq) {
     // Initialize from database
-    const latest = _db!.select({ accn: insiderTransactions.accessionNumber })
+    const latest = await _db!.select({ accn: insiderTransactions.accessionNumber })
       .from(insiderTransactions)
       .where(sql`accession_number LIKE ${agent.cik + '%'}`)
       .orderBy(sql`accession_number DESC`)
-      .limit(1)
-      .get();
+      .limit(1);
 
-    if (latest) {
-      const parsed = parseAccessionNumber(latest.accn);
+    if (latest.length > 0) {
+      const parsed = parseAccessionNumber(latest[0].accn);
       if (parsed) {
         lastSeq = parsed.seq;
       }
@@ -316,10 +315,10 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     // Insert into database
     for (const tx of purchases) {
       try {
-        _db!.insert(insiderTransactions).values({
+        await _db!.insert(insiderTransactions).values({
           ...tx,
           createdAt: new Date().toISOString(),
-        }).run();
+        });
       } catch (e: any) {
         processingStats.dbError++;
         if (processingStats.dbError <= 3) console.log(`[POLLER] DB insert error: ${e.message} for ${accession}`);
@@ -478,7 +477,7 @@ function isActiveHours(): boolean {
 // MAIN POLLING LOOP
 // ============================================================
 
-export function startV3Polling(db: BetterSQLite3Database): void {
+export async function startV3Polling(db: NodePgDatabase): Promise<void> {
   if (pollingActive) return;
   _db = db;
   pollingActive = true;
@@ -488,10 +487,9 @@ export function startV3Polling(db: BetterSQLite3Database): void {
   console.log("[V3 POLLER] Prediction: 0.5s during active hours (top 20 agents = 64% coverage)");
 
   // Load seen accessions from DB to avoid reprocessing
-  const recent = db.select({ accn: insiderTransactions.accessionNumber })
+  const recent = await db.select({ accn: insiderTransactions.accessionNumber })
     .from(insiderTransactions)
-    .where(sql`filing_date >= date('now', '-7 days')`)
-    .all();
+    .where(sql`filing_date >= CURRENT_DATE - INTERVAL '7 days'`);
 
   for (const r of recent) {
     seenAccessions.add(r.accn);
@@ -500,15 +498,14 @@ export function startV3Polling(db: BetterSQLite3Database): void {
 
   // Initialize agent sequences
   for (const agent of TOP_FILING_AGENTS) {
-    const latest = db.select({ accn: insiderTransactions.accessionNumber })
+    const latest = await db.select({ accn: insiderTransactions.accessionNumber })
       .from(insiderTransactions)
       .where(sql`accession_number LIKE ${agent.cik + '%'}`)
       .orderBy(sql`accession_number DESC`)
-      .limit(1)
-      .get();
+      .limit(1);
 
-    if (latest) {
-      const parsed = parseAccessionNumber(latest.accn);
+    if (latest.length > 0) {
+      const parsed = parseAccessionNumber(latest[0].accn);
       if (parsed) agentSequences.set(agent.cik, parsed.seq);
     }
   }

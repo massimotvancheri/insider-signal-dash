@@ -17,12 +17,14 @@ Usage:
   python3 scripts/factor-research.py
 """
 
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import math
 import json
+import os
 from datetime import datetime
 
-DB_PATH = "data.db"
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres@localhost:5432/insider_signal")
 
 # Horizons to analyze (trading days from filing)
 HORIZONS = [1, 2, 3, 5, 10, 21, 42, 63, 126, 252]
@@ -32,10 +34,8 @@ HORIZONS = [1, 2, 3, 5, 10, 21, 42, 63, 126, 252]
 ENRICHED_SIGNAL_FILTER = "ps.id IN (SELECT signal_id FROM signal_entry_prices)"
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn = psycopg2.connect(DB_URL)
+    conn.autocommit = False
     return conn
 
 def compute_stats(values):
@@ -77,9 +77,12 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
     print(f"\n  [{factor_name}] Analyzing...")
     
     # Get signal IDs and their slice assignments
-    cursor = conn.execute(sql_query)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql_query)
+        rows = cur.fetchall()
+    
     signal_slices = {}
-    for row in cursor:
+    for row in rows:
         sid = row["signal_id"]
         slice_name = str(row["slice_name"])
         signal_slices[sid] = slice_name
@@ -98,25 +101,26 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
         # Fetch excess returns for this horizon
         signal_ids = list(signal_slices.keys())
         
-        # Build query in batches to avoid SQLite parameter limits
+        # Build query in batches to avoid memory issues
         returns_by_slice = {s: [] for s in slices}
         
         batch_size = 500
         for i in range(0, len(signal_ids), batch_size):
             batch = signal_ids[i:i+batch_size]
-            placeholders = ",".join("?" * len(batch))
-            cursor = conn.execute(f"""
-                SELECT signal_id, excess_from_next_open
-                FROM daily_forward_returns
-                WHERE signal_id IN ({placeholders}) AND trading_day = ?
-                AND excess_from_next_open IS NOT NULL
-            """, batch + [horizon])
-            
-            for row in cursor:
-                sid = row["signal_id"]
-                if sid in signal_slices:
-                    slice_name = signal_slices[sid]
-                    returns_by_slice[slice_name].append(row["excess_from_next_open"])
+            placeholders = ",".join(["%s"] * len(batch))
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT signal_id, excess_from_next_open
+                    FROM daily_forward_returns
+                    WHERE signal_id IN ({placeholders}) AND trading_day = %s
+                    AND excess_from_next_open IS NOT NULL
+                """, batch + [horizon])
+                
+                for row in cur:
+                    sid = row["signal_id"]
+                    if sid in signal_slices:
+                        slice_name = signal_slices[sid]
+                        returns_by_slice[slice_name].append(row["excess_from_next_open"])
         
         # Compute stats for each slice
         for slice_name, returns in returns_by_slice.items():
@@ -124,19 +128,31 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
             if stats is None:
                 continue
             
-            conn.execute("""
-                INSERT OR REPLACE INTO factor_analysis
-                (factor_name, slice_name, horizon, sample_size, mean_excess_return,
-                 median_excess_return, std_dev, t_stat, win_rate, information_ratio,
-                 window_start, window_end, computed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                factor_name, slice_name, horizon,
-                stats["n"], stats["mean"], stats["median"],
-                stats["std"], stats["t_stat"], stats["win_rate"], stats["ir"],
-                "2020-01-01", datetime.now().strftime("%Y-%m-%d"),
-                datetime.now().isoformat(),
-            ))
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO factor_analysis
+                    (factor_name, slice_name, horizon, sample_size, mean_excess_return,
+                     median_excess_return, std_dev, t_stat, win_rate, information_ratio,
+                     window_start, window_end, computed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (factor_name, slice_name, horizon) DO UPDATE SET
+                      sample_size = EXCLUDED.sample_size,
+                      mean_excess_return = EXCLUDED.mean_excess_return,
+                      median_excess_return = EXCLUDED.median_excess_return,
+                      std_dev = EXCLUDED.std_dev,
+                      t_stat = EXCLUDED.t_stat,
+                      win_rate = EXCLUDED.win_rate,
+                      information_ratio = EXCLUDED.information_ratio,
+                      window_start = EXCLUDED.window_start,
+                      window_end = EXCLUDED.window_end,
+                      computed_at = EXCLUDED.computed_at
+                """, (
+                    factor_name, slice_name, horizon,
+                    stats["n"], stats["mean"], stats["median"],
+                    stats["std"], stats["t_stat"], stats["win_rate"], stats["ir"],
+                    "2020-01-01", datetime.now().strftime("%Y-%m-%d"),
+                    datetime.now().isoformat(),
+                ))
             results_count += 1
     
     conn.commit()
@@ -148,7 +164,7 @@ def run_all_analyses(conn):
     total_results = 0
     
     # === Factor 1: Filing Lag ===
-    total_results += analyze_factor(conn, "filing_lag", """
+    total_results += analyze_factor(conn, "filing_lag", f"""
         SELECT ps.id as signal_id,
             CASE 
                 WHEN it.filing_lag_days <= 1 THEN '0-1 days'
@@ -162,11 +178,11 @@ def run_all_analyses(conn):
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.filing_lag_days IS NOT NULL AND it.filing_lag_days >= 0
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.filing_lag_days
+    """)
     
     # === Factor 2: Direct vs Indirect ===
-    total_results += analyze_factor(conn, "ownership_type", """
+    total_results += analyze_factor(conn, "ownership_type", f"""
         SELECT ps.id as signal_id,
             CASE 
                 WHEN it.indirect_account_type = 'direct' THEN 'Direct'
@@ -181,15 +197,15 @@ def run_all_analyses(conn):
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.indirect_account_type IS NOT NULL
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.indirect_account_type
+    """)
     
     # === Factor 3: Routine vs Opportunistic ===
-    total_results += analyze_factor(conn, "opportunistic", """
+    total_results += analyze_factor(conn, "opportunistic", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN it.is_opportunistic = 1 THEN 'Opportunistic'
-                WHEN it.is_opportunistic = 0 THEN 'Routine'
+                WHEN it.is_opportunistic = true THEN 'Opportunistic'
+                WHEN it.is_opportunistic = false THEN 'Routine'
                 ELSE 'Unknown'
             END as slice_name
         FROM purchase_signals ps
@@ -197,11 +213,11 @@ def run_all_analyses(conn):
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.is_opportunistic IS NOT NULL
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.is_opportunistic
+    """)
     
     # === Factor 4: Cluster Size ===
-    total_results += analyze_factor(conn, "cluster_size", """
+    total_results += analyze_factor(conn, "cluster_size", f"""
         SELECT id as signal_id,
             CASE 
                 WHEN cluster_size = 1 THEN '1 (isolated)'
@@ -210,36 +226,36 @@ def run_all_analyses(conn):
             END as slice_name
         FROM purchase_signals ps
         WHERE {ENRICHED_SIGNAL_FILTER}
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+    """)
     
     # === Factor 5: Insider Role ===
-    total_results += analyze_factor(conn, "insider_role", """
+    total_results += analyze_factor(conn, "insider_role", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN it.reporting_person_title LIKE '%CEO%' OR it.reporting_person_title LIKE '%Chief Executive%' THEN 'CEO'
-                WHEN it.reporting_person_title LIKE '%CFO%' OR it.reporting_person_title LIKE '%Chief Financial%' THEN 'CFO'
-                WHEN it.reporting_person_title LIKE '%COO%' OR it.reporting_person_title LIKE '%Chief Operating%' THEN 'COO'
-                WHEN it.reporting_person_title LIKE '%Chief%' OR it.reporting_person_title LIKE '%President%' THEN 'Other C-Suite'
-                WHEN it.is_director = 1 AND it.is_officer = 0 THEN 'Director'
-                WHEN it.is_ten_percent_owner = 1 THEN '10% Owner'
+                WHEN it.reporting_person_title LIKE '%%CEO%%' OR it.reporting_person_title LIKE '%%Chief Executive%%' THEN 'CEO'
+                WHEN it.reporting_person_title LIKE '%%CFO%%' OR it.reporting_person_title LIKE '%%Chief Financial%%' THEN 'CFO'
+                WHEN it.reporting_person_title LIKE '%%COO%%' OR it.reporting_person_title LIKE '%%Chief Operating%%' THEN 'COO'
+                WHEN it.reporting_person_title LIKE '%%Chief%%' OR it.reporting_person_title LIKE '%%President%%' THEN 'Other C-Suite'
+                WHEN it.is_director = true AND it.is_officer = false THEN 'Director'
+                WHEN it.is_ten_percent_owner = true THEN '10%% Owner'
                 ELSE 'Other Officer'
             END as slice_name
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.reporting_person_title, it.is_director, it.is_officer, it.is_ten_percent_owner
+    """)
     
     # === Factor 6: Ownership Change % ===
-    total_results += analyze_factor(conn, "ownership_change_pct", """
+    total_results += analyze_factor(conn, "ownership_change_pct", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN AVG(it.ownership_change_pct) > 50 THEN '>50% increase'
-                WHEN AVG(it.ownership_change_pct) > 20 THEN '20-50% increase'
-                WHEN AVG(it.ownership_change_pct) > 5 THEN '5-20% increase'
-                WHEN AVG(it.ownership_change_pct) > 1 THEN '1-5% increase'
-                ELSE '<1% increase'
+                WHEN AVG(it.ownership_change_pct) > 50 THEN '>50%% increase'
+                WHEN AVG(it.ownership_change_pct) > 20 THEN '20-50%% increase'
+                WHEN AVG(it.ownership_change_pct) > 5 THEN '5-20%% increase'
+                WHEN AVG(it.ownership_change_pct) > 1 THEN '1-5%% increase'
+                ELSE '<1%% increase'
             END as slice_name
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
@@ -248,10 +264,10 @@ def run_all_analyses(conn):
             AND it.ownership_change_pct IS NOT NULL AND it.ownership_change_pct >= 0
             AND it.ownership_change_pct < 10000
         GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+    """)
     
     # === Factor 7: Transaction Value ===
-    total_results += analyze_factor(conn, "transaction_value", """
+    total_results += analyze_factor(conn, "transaction_value", f"""
         SELECT id as signal_id,
             CASE 
                 WHEN total_purchase_value >= 1000000 THEN '$1M+'
@@ -262,35 +278,35 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND total_purchase_value > 0
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+    """)
     
     # === Factor 8: Prior 30d Momentum ===
-    total_results += analyze_factor(conn, "prior_momentum_30d", """
+    total_results += analyze_factor(conn, "prior_momentum_30d", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN it.prior_return_30d < -0.15 THEN 'Down >15%'
-                WHEN it.prior_return_30d < -0.05 THEN 'Down 5-15%'
-                WHEN it.prior_return_30d < 0.05 THEN 'Flat (-5% to +5%)'
-                WHEN it.prior_return_30d < 0.15 THEN 'Up 5-15%'
-                ELSE 'Up >15%'
+                WHEN it.prior_return_30d < -0.15 THEN 'Down >15%%'
+                WHEN it.prior_return_30d < -0.05 THEN 'Down 5-15%%'
+                WHEN it.prior_return_30d < 0.05 THEN 'Flat (-5%% to +5%%)'
+                WHEN it.prior_return_30d < 0.15 THEN 'Up 5-15%%'
+                ELSE 'Up >15%%'
             END as slice_name
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.prior_return_30d IS NOT NULL
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.prior_return_30d
+    """)
     
     # === Factor 9: Distance from 52-Week High ===
-    total_results += analyze_factor(conn, "distance_52w_high", """
+    total_results += analyze_factor(conn, "distance_52w_high", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN it.distance_from_52w_high < 0.5 THEN '<50% of high'
-                WHEN it.distance_from_52w_high < 0.7 THEN '50-70% of high'
-                WHEN it.distance_from_52w_high < 0.85 THEN '70-85% of high'
-                WHEN it.distance_from_52w_high < 0.95 THEN '85-95% of high'
-                ELSE 'Near high (>95%)'
+                WHEN it.distance_from_52w_high < 0.5 THEN '<50%% of high'
+                WHEN it.distance_from_52w_high < 0.7 THEN '50-70%% of high'
+                WHEN it.distance_from_52w_high < 0.85 THEN '70-85%% of high'
+                WHEN it.distance_from_52w_high < 0.95 THEN '85-95%% of high'
+                ELSE 'Near high (>95%%)'
             END as slice_name
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
@@ -298,18 +314,18 @@ def run_all_analyses(conn):
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.distance_from_52w_high IS NOT NULL
             AND it.distance_from_52w_high > 0 AND it.distance_from_52w_high <= 1.1
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.distance_from_52w_high
+    """)
     
     # === Factor 10: Price Drift from Insider Transaction ===
-    total_results += analyze_factor(conn, "price_drift_from_tx", """
+    total_results += analyze_factor(conn, "price_drift_from_tx", f"""
         SELECT ps.id as signal_id,
             CASE 
-                WHEN it.price_drift_from_tx < -0.05 THEN 'Stock dropped >5% since insider bought'
-                WHEN it.price_drift_from_tx < 0.02 THEN 'Minimal drift (±2%)'
-                WHEN it.price_drift_from_tx < 0.05 THEN 'Up 2-5% since insider bought'
-                WHEN it.price_drift_from_tx < 0.10 THEN 'Up 5-10% since insider bought'
-                ELSE 'Up >10% since insider bought'
+                WHEN it.price_drift_from_tx < -0.05 THEN 'Stock dropped >5%% since insider bought'
+                WHEN it.price_drift_from_tx < 0.02 THEN 'Minimal drift (±2%%)'
+                WHEN it.price_drift_from_tx < 0.05 THEN 'Up 2-5%% since insider bought'
+                WHEN it.price_drift_from_tx < 0.10 THEN 'Up 5-10%% since insider bought'
+                ELSE 'Up >10%% since insider bought'
             END as slice_name
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
@@ -317,11 +333,11 @@ def run_all_analyses(conn):
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.price_drift_from_tx IS NOT NULL
             AND ABS(it.price_drift_from_tx) < 5
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.price_drift_from_tx
+    """)
     
     # === Factor 11: Volume Spike ===
-    total_results += analyze_factor(conn, "volume_spike", """
+    total_results += analyze_factor(conn, "volume_spike", f"""
         SELECT ps.id as signal_id,
             CASE 
                 WHEN it.recent_volume_spike > 3.0 THEN 'High spike (>3x)'
@@ -334,8 +350,8 @@ def run_all_analyses(conn):
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
         WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.recent_volume_spike IS NOT NULL AND it.recent_volume_spike > 0
-        GROUP BY ps.id
-    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
+        GROUP BY ps.id, it.recent_volume_spike
+    """)
     
     return total_results
 
@@ -344,16 +360,18 @@ def derive_model_weights(conn):
     print("\n=== Deriving Model Weights ===")
     
     # For each factor, find the horizon with the best information ratio
-    factors = conn.execute("""
-        SELECT factor_name, 
-            MAX(ABS(information_ratio)) as best_ir,
-            horizon as best_horizon,
-            sample_size
-        FROM factor_analysis
-        WHERE sample_size >= 20 AND ABS(t_stat) >= 1.5
-        GROUP BY factor_name
-        ORDER BY best_ir DESC
-    """).fetchall()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT factor_name, 
+                MAX(ABS(information_ratio)) as best_ir,
+                horizon as best_horizon,
+                sample_size
+            FROM factor_analysis
+            WHERE sample_size >= 20 AND ABS(t_stat) >= 1.5
+            GROUP BY factor_name, horizon, sample_size
+            ORDER BY best_ir DESC
+        """)
+        factors = cur.fetchall()
     
     if not factors:
         print("  No significant factors found!")
@@ -382,17 +400,27 @@ def derive_model_weights(conn):
         effective = (n / (n + prior_strength)) * data_weight + (prior_strength / (n + prior_strength)) * prior_weight
         confidence = min(n / 500, 1.0)
         
-        conn.execute("""
-            INSERT OR REPLACE INTO model_weights
-            (factor_name, data_weight, prior_weight, effective_weight,
-             sample_size, information_ratio, optimal_horizon,
-             confidence_level, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            factor_name, data_weight, prior_weight, effective,
-            n, f["best_ir"], f["best_horizon"],
-            confidence, datetime.now().isoformat(),
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO model_weights
+                (factor_name, data_weight, prior_weight, effective_weight,
+                 sample_size, information_ratio, optimal_horizon,
+                 confidence_level, last_updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (factor_name) DO UPDATE SET
+                  data_weight = EXCLUDED.data_weight,
+                  prior_weight = EXCLUDED.prior_weight,
+                  effective_weight = EXCLUDED.effective_weight,
+                  sample_size = EXCLUDED.sample_size,
+                  information_ratio = EXCLUDED.information_ratio,
+                  optimal_horizon = EXCLUDED.optimal_horizon,
+                  confidence_level = EXCLUDED.confidence_level,
+                  last_updated = EXCLUDED.last_updated
+            """, (
+                factor_name, data_weight, prior_weight, effective,
+                n, f["best_ir"], f["best_horizon"],
+                confidence, datetime.now().isoformat(),
+            ))
         
         print(f"  {factor_name:30s} | IR: {f['best_ir']:7.4f} | Data: {data_weight:.3f} | Prior: {prior_weight:.3f} | Effective: {effective:.3f} | N: {n}")
     
@@ -404,8 +432,9 @@ def main():
     conn = get_db()
     
     # Clear previous results
-    conn.execute("DELETE FROM factor_analysis")
-    conn.execute("DELETE FROM model_weights")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM factor_analysis")
+        cur.execute("DELETE FROM model_weights")
     conn.commit()
     
     # Run all factor analyses
@@ -414,24 +443,26 @@ def main():
     
     # Show key findings
     print("\n=== Key Findings (63-day horizon) ===")
-    results = conn.execute("""
-        SELECT factor_name, slice_name, sample_size,
-            ROUND(mean_excess_return * 100, 2) as mean_pct,
-            ROUND(t_stat, 2) as t_stat,
-            ROUND(win_rate * 100, 1) as win_rate_pct,
-            ROUND(information_ratio, 4) as ir
-        FROM factor_analysis
-        WHERE horizon = 63 AND sample_size >= 10
-        ORDER BY factor_name, mean_excess_return DESC
-    """).fetchall()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT factor_name, slice_name, sample_size,
+                ROUND(mean_excess_return * 100, 2) as mean_pct,
+                ROUND(t_stat::numeric, 2) as t_stat,
+                ROUND(win_rate * 100, 1) as win_rate_pct,
+                ROUND(information_ratio::numeric, 4) as ir
+            FROM factor_analysis
+            WHERE horizon = 63 AND sample_size >= 10
+            ORDER BY factor_name, mean_excess_return DESC
+        """)
+        results = cur.fetchall()
     
     current_factor = ""
     for r in results:
         if r["factor_name"] != current_factor:
             current_factor = r["factor_name"]
             print(f"\n  {current_factor}:")
-        sig = "***" if abs(r["t_stat"]) >= 2.0 else "**" if abs(r["t_stat"]) >= 1.5 else "*" if abs(r["t_stat"]) >= 1.0 else ""
-        print(f"    {r['slice_name']:35s} N={r['sample_size']:4d} | Excess: {r['mean_pct']:+7.2f}% | t={r['t_stat']:+6.2f}{sig} | Win: {r['win_rate_pct']:.1f}% | IR: {r['ir']:.4f}")
+        sig = "***" if abs(float(r["t_stat"])) >= 2.0 else "**" if abs(float(r["t_stat"])) >= 1.5 else "*" if abs(float(r["t_stat"])) >= 1.0 else ""
+        print(f"    {r['slice_name']:35s} N={r['sample_size']:4d} | Excess: {float(r['mean_pct']):+7.2f}% | t={float(r['t_stat']):+6.2f}{sig} | Win: {float(r['win_rate_pct']):.1f}% | IR: {float(r['ir']):.4f}")
     
     # Derive model weights
     derive_model_weights(conn)
