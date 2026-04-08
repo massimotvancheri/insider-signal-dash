@@ -379,7 +379,7 @@ export async function getEnhancedMissedSignals(days = 90, minScore = 70) {
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
     WHERE ps.signal_score >= $1
-      AND ps.signal_date >= CURRENT_DATE - INTERVAL '1 day' * $2
+      AND ps.signal_date >= to_char(CURRENT_DATE - INTERVAL '1 day' * $2, 'YYYY-MM-DD')
     ORDER BY ps.signal_score DESC
     LIMIT 100
   `, [minScore, days]);

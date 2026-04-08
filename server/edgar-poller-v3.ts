@@ -489,7 +489,7 @@ export async function startV3Polling(db: NodePgDatabase): Promise<void> {
   // Load seen accessions from DB to avoid reprocessing
   const recent = await db.select({ accn: insiderTransactions.accessionNumber })
     .from(insiderTransactions)
-    .where(sql`filing_date >= CURRENT_DATE - INTERVAL '7 days'`);
+    .where(sql`filing_date >= to_char(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD')`);
 
   for (const r of recent) {
     seenAccessions.add(r.accn);

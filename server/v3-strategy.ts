@@ -368,7 +368,7 @@ export async function getMissedSignals(days = 90) {
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
     WHERE ps.score_tier <= 2
-      AND ps.signal_date >= CURRENT_DATE - INTERVAL '1 day' * $1
+      AND ps.signal_date >= to_char(CURRENT_DATE - INTERVAL '1 day' * $1, 'YYYY-MM-DD')
       AND ps.id NOT IN (
         SELECT DISTINCT signal_id FROM execution_deviations WHERE signal_id IS NOT NULL
       )
@@ -434,7 +434,7 @@ export async function getPortfolioWithSignalHealth(getSchwabAccessToken?: () => 
   const recentSignalsResult = await pool.query(`
     SELECT id, issuer_ticker, signal_date, signal_score, score_tier
     FROM purchase_signals
-    WHERE signal_date >= CURRENT_DATE - INTERVAL '90 days'
+    WHERE signal_date >= to_char(CURRENT_DATE - INTERVAL '90 days', 'YYYY-MM-DD')
     ORDER BY signal_date DESC
   `);
   const recentSignals = recentSignalsResult.rows;
