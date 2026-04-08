@@ -397,7 +397,7 @@ export async function registerRoutes(
     if (config.tokenExpiresAt && new Date(config.tokenExpiresAt).getTime() < Date.now() + 60000) {
       const refreshed = await refreshSchwabToken();
       if (!refreshed) return null;
-      return (await storage.getSchwabConfig()?.accessToken || null;
+      return (await storage.getSchwabConfig())?.accessToken || null;
     }
     return config.accessToken;
   }
@@ -604,7 +604,7 @@ export async function registerRoutes(
                 AND signal_date <= ${executionDate}
               ORDER BY signal_date DESC
               LIMIT 1
-            `) as any[];
+            `)) as any[];
 
             const matchingSignal = matchingSignals[0];
 
@@ -651,7 +651,7 @@ export async function registerRoutes(
                 AND te.id NOT IN (SELECT ct.id FROM closed_trades ct WHERE ct.ticker = ${ticker})
               ORDER BY te.execution_date ASC
               LIMIT 1
-            `) as any[];
+            `)) as any[];
 
             const matchingBuy = openBuys[0];
             if (matchingBuy) {
@@ -667,7 +667,7 @@ export async function registerRoutes(
                 SELECT ed.classification, ed.signal_id FROM execution_deviations ed
                 WHERE ed.user_trade_id = ${matchingBuy.id}
                 LIMIT 1
-              `) as any[];
+              `)) as any[];
 
               await storage.insertClosedTrade({
                 ticker,
@@ -795,7 +795,7 @@ export async function registerRoutes(
     enrichmentRunning = true;
     console.log("[ENRICH] Starting batch...");
     exec("nice -n 10 python3 scripts/enrich-prices.py 2000 2010", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
-      (error: any, stdout: string, stderr: string) => {
+      async (error: any, stdout: string, stderr: string) => {
         enrichmentRunning = false;
         if (error) console.error("[ENRICH] Batch failed:", error.message);
         if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
@@ -1131,7 +1131,7 @@ chmod +x /opt/deploy.sh`,
   // The API endpoint returns [] if the cache file doesn't exist yet.
 
   // Auto-resume continuous enrichment on server startup after a 30s delay
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
       await invalidatePipelineStatusCache();
       const status = await getDataPipelineStatus();
