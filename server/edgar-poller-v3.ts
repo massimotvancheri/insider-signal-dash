@@ -296,6 +296,10 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     
     if (transactions.length === 0) {
       processingStats.noTx++;
+      // Log first few failures for debugging
+      if (processingStats.noTx <= 3) {
+        console.log(`[POLLER] No transactions in ${accession} | XML URL: ${xmlUrl} | XML preview: ${xml.slice(0, 200).replace(/\s+/g, ' ')}`);
+      }
       return;
     }
     
