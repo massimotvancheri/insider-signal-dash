@@ -36,8 +36,8 @@ export async function registerRoutes(
 
   // Auto-run trade matching on startup (if trades exist but no closed trades)
   try {
-    const tradeCount = (await db.execute(sql`SELECT count(*) as c FROM trade_executions`)[0] as any;
-    const closedCount = (await db.execute(sql`SELECT count(*) as c FROM closed_trades`)[0] as any;
+    const tradeCount = (await db.execute(sql`SELECT count(*) as c FROM trade_executions`))[0] as any;
+    const closedCount = (await db.execute(sql`SELECT count(*) as c FROM closed_trades`))[0] as any;
     if (tradeCount?.c > 0 && closedCount?.c === 0) {
       console.log("[STARTUP] Running signal-trade matching and FIFO matching...");
       const sigResult = await runSignalTradeMatching();
