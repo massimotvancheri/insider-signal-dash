@@ -1021,7 +1021,8 @@ export async function registerRoutes(
     const { exec } = require("child_process");
     const lines = parseInt(req.query.lines as string) || 50;
     const grep = req.query.grep ? `| grep -i '${(req.query.grep as string).replace(/'/g, '')}'` : '';
-    exec(`journalctl -u insider-signal --no-pager -n ${lines} ${grep}`,
+    const service = req.query.service === 'poller' ? 'insider-signal-poller' : 'insider-signal';
+    exec(`journalctl -u ${service} --no-pager -n ${lines} ${grep}`,
       { timeout: 10000 },
       (error: any, stdout: string, stderr: string) => {
         if (error) return res.json({ error: error.message, stderr });
