@@ -823,8 +823,8 @@ export async function registerRoutes(
             execFR("nice -n 10 python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
               (frError: any, frStdout: string, frStderr: string) => {
                 if (frError) console.error("[PIPELINE] Factor research failed:", frError.message);
-                if (frStdout) console.log("[PIPELINE] Factor research stdout:", frStdout.slice(-500));
-                if (frStderr) console.error("[PIPELINE] Factor research stderr:", frStderr.slice(-500));
+                if (frStdout) console.log("[PIPELINE] Factor research stdout:", frStdout.slice(-2000));
+                if (frStderr) console.error("[PIPELINE] Factor research stderr:", frStderr.slice(-2000));
                 console.log("[PIPELINE] Factor research complete. Auto-starting alpha decay...");
                 precomputeAlphaDecay().then(() => {
                   console.log("[PIPELINE] Full pipeline complete: enrichment → factor research → alpha decay");
@@ -1218,7 +1218,55 @@ chmod +x /opt/deploy.sh`,
         insiderProfiles: status.insiderProfiles,
         failedTickers: status.failedTickers,
       },
+      disk: (() => {
+        try {
+          const { execSync } = require("child_process");
+          const df = execSync("df -h / | tail -1").toString().trim().split(/\s+/);
+          const du = execSync("du -sh /opt/insider-signal-dash/data/ /opt/insider-signal-dash/data/sec-raw/ 2>/dev/null || echo 'N/A'").toString().trim();
+          return { filesystem: df[0], size: df[1], used: df[2], available: df[3], usePct: df[4], dataDirSizes: du };
+        } catch { return { error: "could not check" }; }
+      })(),
     });
+  });
+
+  // Admin: disk cleanup — remove SEC raw data files (already imported into DB)
+  app.post("/api/admin/disk-cleanup", (req, res) => {
+    const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const { execSync } = require("child_process");
+    try {
+      const before = execSync("df / | tail -1").toString().trim().split(/\s+/);
+      // Remove SEC raw data (zip files and extracted TSVs)
+      execSync("rm -rf /opt/insider-signal-dash/data/sec-raw/*", { timeout: 30000 });
+      // VACUUM the database to reclaim space from deleted rows
+      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 60000 });
+      const after = execSync("df / | tail -1").toString().trim().split(/\s+/);
+      const freedKB = parseInt(after[3]) - parseInt(before[3]);
+      res.json({ status: "cleanup_complete", freedMB: Math.round(freedKB / 1024), diskBefore: before[4], diskAfter: after[4], availableAfter: after[3] + "K" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Admin: run arbitrary shell command (DANGEROUS — admin only)
+  app.post("/api/admin/shell", (req, res) => {
+    const secret = req.headers["authorization"]?.replace("Bearer ", "") || req.headers["x-deploy-secret"] || req.query.secret;
+    if (secret !== process.env.DEPLOY_SECRET && secret !== DEPLOY_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const cmd = req.body?.command;
+    if (!cmd || typeof cmd !== "string") {
+      return res.status(400).json({ error: "missing command" });
+    }
+    const { execSync } = require("child_process");
+    try {
+      const output = execSync(cmd, { cwd: "/opt/insider-signal-dash", timeout: 30000, maxBuffer: 1024 * 1024 }).toString();
+      res.json({ output });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message, stderr: e.stderr?.toString()?.slice(-500) });
+    }
   });
 
   return httpServer;
