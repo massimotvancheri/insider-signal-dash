@@ -2047,6 +2047,16 @@ async function registerRoutes(httpServer2, app2) {
   let enrichmentRunning = false;
   let enrichmentContinuous = false;
   let lastEnrichedCount = 0;
+  let enrichBatchCount = 0;
+  function walCheckpoint() {
+    try {
+      const { execSync } = require("child_process");
+      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(PASSIVE);"', { timeout: 12e4 });
+      console.log("[DB] WAL checkpoint completed");
+    } catch (e) {
+      console.error("[DB] WAL checkpoint failed:", e.message);
+    }
+  }
   function runEnrichmentBatch() {
     const { exec } = require("child_process");
     enrichmentRunning = true;
@@ -2059,6 +2069,8 @@ async function registerRoutes(httpServer2, app2) {
         if (error) console.error("[ENRICH] Batch failed:", error.message);
         if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
+        enrichBatchCount++;
+        if (enrichBatchCount % 3 === 0) walCheckpoint();
         if (enrichmentContinuous) {
           invalidatePipelineStatusCache();
           const status = getDataPipelineStatus();
@@ -2068,6 +2080,7 @@ async function registerRoutes(httpServer2, app2) {
           if (noSignals || noProgress && !error) {
             console.log(`[ENRICH] No more enrichable signals (${currentEnriched} total enriched, ${status.enrichmentProgress}%). Stopping continuous mode.`);
             enrichmentContinuous = false;
+            walCheckpoint();
             console.log("[PIPELINE] Enrichment complete. Auto-starting factor research...");
             const { exec: execFR } = require("child_process");
             execFR(
@@ -2461,7 +2474,7 @@ chmod +x /opt/deploy.sh`,
     try {
       const before = execSync("df / | tail -1").toString().trim().split(/\s+/);
       execSync("rm -rf /opt/insider-signal-dash/data/sec-raw/*", { timeout: 3e4 });
-      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 6e4 });
+      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 18e4 });
       const after = execSync("df / | tail -1").toString().trim().split(/\s+/);
       const freedKB = parseInt(after[3]) - parseInt(before[3]);
       res.json({ status: "cleanup_complete", freedMB: Math.round(freedKB / 1024), diskBefore: before[4], diskAfter: after[4], availableAfter: after[3] + "K" });
@@ -2480,7 +2493,7 @@ chmod +x /opt/deploy.sh`,
     }
     const { execSync } = require("child_process");
     try {
-      const output = execSync(cmd, { cwd: "/opt/insider-signal-dash", timeout: 3e4, maxBuffer: 1024 * 1024 }).toString();
+      const output = execSync(cmd, { cwd: "/opt/insider-signal-dash", timeout: 12e4, maxBuffer: 1024 * 1024 }).toString();
       res.json({ output });
     } catch (e) {
       res.status(500).json({ error: e.message, stderr: e.stderr?.toString()?.slice(-500) });

@@ -792,6 +792,18 @@ export async function registerRoutes(
 
   let lastEnrichedCount = 0;
 
+  let enrichBatchCount = 0;
+
+  function walCheckpoint() {
+    try {
+      const { execSync } = require("child_process");
+      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(PASSIVE);"', { timeout: 120000 });
+      console.log("[DB] WAL checkpoint completed");
+    } catch (e: any) {
+      console.error("[DB] WAL checkpoint failed:", e.message);
+    }
+  }
+
   function runEnrichmentBatch() {
     const { exec } = require("child_process");
     enrichmentRunning = true;
@@ -802,6 +814,10 @@ export async function registerRoutes(
         if (error) console.error("[ENRICH] Batch failed:", error.message);
         if (stdout) console.log("[ENRICH] stdout:", stdout.slice(-500));
         if (stderr) console.error("[ENRICH] stderr:", stderr.slice(-500));
+
+        // Checkpoint WAL every 3 batches to prevent unbounded WAL growth
+        enrichBatchCount++;
+        if (enrichBatchCount % 3 === 0) walCheckpoint();
 
         // If continuous mode is on, schedule next batch (retry even on error)
         if (enrichmentContinuous) {
@@ -818,6 +834,8 @@ export async function registerRoutes(
             console.log(`[ENRICH] No more enrichable signals (${currentEnriched} total enriched, ${status.enrichmentProgress}%). Stopping continuous mode.`);
             enrichmentContinuous = false;
             // Auto-chain: run factor research after enrichment completes
+            // Checkpoint WAL before factor research to ensure disk space is available
+            walCheckpoint();
             console.log("[PIPELINE] Enrichment complete. Auto-starting factor research...");
             const { exec: execFR } = require("child_process");
             execFR("nice -n 10 python3 scripts/factor-research.py", { cwd: "/opt/insider-signal-dash", timeout: 600000, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
@@ -1241,7 +1259,7 @@ chmod +x /opt/deploy.sh`,
       // Remove SEC raw data (zip files and extracted TSVs)
       execSync("rm -rf /opt/insider-signal-dash/data/sec-raw/*", { timeout: 30000 });
       // VACUUM the database to reclaim space from deleted rows
-      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 60000 });
+      execSync('sqlite3 /opt/insider-signal-dash/data.db "PRAGMA wal_checkpoint(TRUNCATE);"', { timeout: 180000 });
       const after = execSync("df / | tail -1").toString().trim().split(/\s+/);
       const freedKB = parseInt(after[3]) - parseInt(before[3]);
       res.json({ status: "cleanup_complete", freedMB: Math.round(freedKB / 1024), diskBefore: before[4], diskAfter: after[4], availableAfter: after[3] + "K" });
@@ -1262,7 +1280,7 @@ chmod +x /opt/deploy.sh`,
     }
     const { execSync } = require("child_process");
     try {
-      const output = execSync(cmd, { cwd: "/opt/insider-signal-dash", timeout: 30000, maxBuffer: 1024 * 1024 }).toString();
+      const output = execSync(cmd, { cwd: "/opt/insider-signal-dash", timeout: 120000, maxBuffer: 1024 * 1024 }).toString();
       res.json({ output });
     } catch (e: any) {
       res.status(500).json({ error: e.message, stderr: e.stderr?.toString()?.slice(-500) });
