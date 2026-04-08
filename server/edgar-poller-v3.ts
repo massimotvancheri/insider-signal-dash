@@ -266,6 +266,8 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     }
     
     let xmlUrl = xmlMatch[1];
+    // Strip XSLT viewer prefix (xslF345X06/, xslF345X02/, etc.) — we need raw XML, not rendered HTML
+    xmlUrl = xmlUrl.replace(/xslF345X\d+\//i, "");
     if (xmlUrl.startsWith("http")) {
       // Already absolute URL
     } else if (xmlUrl.startsWith("/")) {
