@@ -27,9 +27,15 @@ DB_PATH = "data.db"
 # Horizons to analyze (trading days from filing)
 HORIZONS = [1, 2, 3, 5, 10, 21, 42, 63, 126, 252]
 
+# Use signal_entry_prices instead of scanning 47M+ daily_forward_returns
+# for the enriched signal set. Much faster.
+ENRICHED_SIGNAL_FILTER = "ps.id IN (SELECT signal_id FROM signal_entry_prices)"
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 def compute_stats(values):
@@ -154,10 +160,10 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.filing_lag_days IS NOT NULL AND it.filing_lag_days >= 0
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 2: Direct vs Indirect ===
     total_results += analyze_factor(conn, "ownership_type", """
@@ -173,10 +179,10 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.indirect_account_type IS NOT NULL
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 3: Routine vs Opportunistic ===
     total_results += analyze_factor(conn, "opportunistic", """
@@ -189,10 +195,10 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.is_opportunistic IS NOT NULL
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 4: Cluster Size ===
     total_results += analyze_factor(conn, "cluster_size", """
@@ -202,9 +208,9 @@ def run_all_analyses(conn):
                 WHEN cluster_size = 2 THEN '2 insiders'
                 WHEN cluster_size >= 3 THEN '3+ insiders'
             END as slice_name
-        FROM purchase_signals
-        WHERE id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
-    """)
+        FROM purchase_signals ps
+        WHERE {ENRICHED_SIGNAL_FILTER}
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 5: Insider Role ===
     total_results += analyze_factor(conn, "insider_role", """
@@ -221,9 +227,9 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 6: Ownership Change % ===
     total_results += analyze_factor(conn, "ownership_change_pct", """
@@ -238,11 +244,11 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.ownership_change_pct IS NOT NULL AND it.ownership_change_pct >= 0
             AND it.ownership_change_pct < 10000
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 7: Transaction Value ===
     total_results += analyze_factor(conn, "transaction_value", """
@@ -253,10 +259,10 @@ def run_all_analyses(conn):
                 WHEN total_purchase_value >= 50000 THEN '$50K-$250K'
                 ELSE '<$50K'
             END as slice_name
-        FROM purchase_signals
-        WHERE id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        FROM purchase_signals ps
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND total_purchase_value > 0
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 8: Prior 30d Momentum ===
     total_results += analyze_factor(conn, "prior_momentum_30d", """
@@ -271,10 +277,10 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.prior_return_30d IS NOT NULL
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 9: Distance from 52-Week High ===
     total_results += analyze_factor(conn, "distance_52w_high", """
@@ -289,11 +295,11 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.distance_from_52w_high IS NOT NULL
             AND it.distance_from_52w_high > 0 AND it.distance_from_52w_high <= 1.1
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 10: Price Drift from Insider Transaction ===
     total_results += analyze_factor(conn, "price_drift_from_tx", """
@@ -308,11 +314,11 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.price_drift_from_tx IS NOT NULL
             AND ABS(it.price_drift_from_tx) < 5
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     # === Factor 11: Volume Spike ===
     total_results += analyze_factor(conn, "volume_spike", """
@@ -326,10 +332,10 @@ def run_all_analyses(conn):
         FROM purchase_signals ps
         JOIN insider_transactions it ON it.issuer_ticker = ps.issuer_ticker 
             AND it.filing_date = ps.signal_date AND it.transaction_type = 'P'
-        WHERE ps.id IN (SELECT DISTINCT signal_id FROM daily_forward_returns)
+        WHERE {ENRICHED_SIGNAL_FILTER}
             AND it.recent_volume_spike IS NOT NULL AND it.recent_volume_spike > 0
         GROUP BY ps.id
-    """)
+    """.format(ENRICHED_SIGNAL_FILTER=ENRICHED_SIGNAL_FILTER))
     
     return total_results
 
