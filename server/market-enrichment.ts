@@ -17,7 +17,7 @@
 import { db } from "./db";
 import { 
   purchaseSignals, insiderTransactions, signalEntryPrices, 
-  dailyForwardReturns, pipelineStatus 
+  dailyPrices, pipelineStatus 
 } from "@shared/schema";
 import { eq, and, isNull, desc, sql, inArray } from "drizzle-orm";
 
@@ -201,51 +201,36 @@ async function enrichSignal(
   }).run();
   result.entryPricesSaved = true;
   
-  // === Compute daily forward returns (day 0 through 252) ===
-  const sortedDates = tickerPrices
-    .filter(p => p.date >= filingDate)
-    .sort((a, b) => a.date.localeCompare(b.date));
+  // === Store daily prices (source of truth for forward return computation) ===
+  // Professional quant pattern: store prices, compute returns on demand via SQL
+  const allPrices = tickerPrices.sort((a, b) => a.date.localeCompare(b.date));
   
-  const forwardDays = Math.min(sortedDates.length, 253); // day 0 through 252
-  const returnRecords: any[] = [];
-  
-  for (let d = 0; d < forwardDays; d++) {
-    const dayPrice = sortedDates[d];
-    const spyDay = spyPrices.get(dayPrice.date);
-    
-    const returnFromOpen = entryOpen > 0 ? (dayPrice.close / entryOpen) - 1 : null;
-    const spyEntryDay = spyPrices.get(entryPrice.date);
-    const benchReturn = spyDay && spyEntryDay 
-      ? (spyDay.close / spyEntryDay.close) - 1 
-      : null;
-    
-    returnRecords.push({
-      signalId: signal.id,
-      tradingDay: d,
-      calendarDate: dayPrice.date,
-      closePrice: dayPrice.close,
-      benchmarkClose: spyDay?.close || null,
-      returnFromNextOpen: returnFromOpen,
-      returnFromAhEntry: null, // No AH data from daily OHLCV
-      excessFromNextOpen: returnFromOpen !== null && benchReturn !== null 
-        ? returnFromOpen - benchReturn 
-        : null,
-      excessFromAhEntry: null,
-    });
-  }
-  
-  // Batch insert forward returns
-  if (returnRecords.length > 0) {
+  // Upsert ticker prices into daily_prices
+  if (allPrices.length > 0) {
     const BATCH = 250;
-    for (let i = 0; i < returnRecords.length; i += BATCH) {
-      const batch = returnRecords.slice(i, i + BATCH);
-      db.transaction((tx) => {
-        for (const rec of batch) {
-          tx.insert(dailyForwardReturns).values(rec).run();
-        }
-      });
+    let priceCount = 0;
+    for (let i = 0; i < allPrices.length; i += BATCH) {
+      const batch = allPrices.slice(i, i + BATCH);
+      for (const p of batch) {
+        db.execute(sql`
+          INSERT INTO daily_prices (ticker, date, open, high, low, close, volume)
+          VALUES (${ticker}, ${p.date}, ${p.open}, ${p.high}, ${p.low}, ${p.close}, ${p.volume})
+          ON CONFLICT (ticker, date) DO NOTHING
+        `);
+        priceCount++;
+      }
     }
-    result.forwardReturnDays = returnRecords.length;
+    
+    // Also store SPY benchmark prices
+    for (const [date, spyData] of spyPrices) {
+      db.execute(sql`
+        INSERT INTO daily_prices (ticker, date, close)
+        VALUES ('SPY', ${date}, ${spyData.close})
+        ON CONFLICT (ticker, date) DO NOTHING
+      `);
+    }
+    
+    result.forwardReturnDays = priceCount;
   }
   
   // === Enrich transaction records with market context ===
@@ -442,7 +427,7 @@ export async function runMarketEnrichment(options: {
   
   // Final stats
   const entryCount = db.select({ count: sql<number>`count(*)` }).from(signalEntryPrices).get();
-  const fwdCount = db.select({ count: sql<number>`count(*)` }).from(dailyForwardReturns).get();
+  const fwdCount = db.select({ count: sql<number>`count(*)` }).from(dailyPrices).get();
   
   console.log(`\n=== Enrichment Complete ===`);
   console.log(`Signals processed: ${processedSignals}`);

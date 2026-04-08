@@ -769,14 +769,14 @@ export async function registerRoutes(
       `);
       const { rows } = await pool.query("SELECT count(*) as c FROM pg_indexes WHERE schemaname = 'public'");
       
-      // Phase 2: Expensive indexes (async, non-blocking)
+      // Phase 2: Daily prices indexes (async, non-blocking)
       pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_fwd_returns_signal_day ON daily_forward_returns(signal_id, trading_day);
-        CREATE INDEX IF NOT EXISTS idx_fwd_returns_day ON daily_forward_returns(trading_day);
-      `).then(() => console.log("[INDEXES] Forward return indexes created"))
-        .catch((err: any) => console.error("[INDEXES] Forward return indexes failed:", err.message));
+        CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker_date ON daily_prices(ticker, date);
+        CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date);
+      `).then(() => console.log("[INDEXES] Daily prices indexes created"))
+        .catch((err: any) => console.error("[INDEXES] Daily prices indexes failed:", err.message));
       
-      res.json({ status: "core_indexes_created", totalIndexes: rows[0]?.c, note: "Forward return indexes creating in background" });
+      res.json({ status: "core_indexes_created", totalIndexes: rows[0]?.c, note: "Daily prices indexes creating in background" });
     } catch (err: any) {
       res.json({ error: err.message });
     }
@@ -1217,7 +1217,7 @@ chmod +x /opt/deploy.sh`,
       },
       data: {
         totalPurchases: status.totalPurchases,
-        forwardReturnDataPoints: status.forwardReturnDataPoints,
+        dailyPriceDataPoints: status.dailyPriceDataPoints,
         insiderProfiles: status.insiderProfiles,
         failedTickers: status.failedTickers,
       },

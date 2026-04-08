@@ -12,7 +12,7 @@
 import { db, pool } from "./db";
 import { 
   factorAnalysis, modelWeights, purchaseSignals, signalEntryPrices,
-  dailyForwardReturns, insiderTransactions, insiderHistory,
+  dailyPrices, insiderTransactions, insiderHistory,
   tradeExecutions, executionDeviations, closedTrades,
   portfolioPositions, strategySnapshots, strategyRecommendations
 } from "@shared/schema";
@@ -101,29 +101,94 @@ export function getAlphaDecayCurve(options: {
   return [];
 }
 
-/** Pre-compute alpha decay data via PostgreSQL and save to JSON file.
- *  Uses pool.query to run the aggregation in PostgreSQL (efficient for 36M+ rows). */
+/** Pre-compute alpha decay data from daily_prices table.
+ *  Computes forward returns on-demand by joining signal entries to daily prices.
+ *  Results cached to JSON file — run via POST /api/admin/precompute-alpha-decay. */
 export async function precomputeAlphaDecay(): Promise<void> {
-  console.log("[ALPHA DECAY] Pre-computing alpha decay curve via PostgreSQL...");
+  console.log("[ALPHA DECAY] Pre-computing alpha decay curve from daily_prices...");
   try {
-    const result = await pool.query(`
-      SELECT trading_day, 
-        COUNT(*) as sample_size, 
-        ROUND(AVG(excess_from_next_open) * 100, 3) as avg_excess_pct, 
-        ROUND(AVG(return_from_next_open) * 100, 3) as avg_return_pct 
-      FROM daily_forward_returns 
-      WHERE excess_from_next_open IS NOT NULL 
-      GROUP BY trading_day 
-      ORDER BY trading_day
+    // Step 1: Get all enriched signals with entry prices and tickers
+    const signals = await pool.query(`
+      SELECT ps.id as signal_id, ps.issuer_ticker as ticker, 
+             sep.next_open as entry_price, ps.signal_date
+      FROM purchase_signals ps
+      JOIN signal_entry_prices sep ON sep.signal_id = ps.id
+      WHERE sep.next_open > 0 AND ps.issuer_ticker IS NOT NULL
     `);
-    const data = result.rows.map((r: any) => ({
-      trading_day: Number(r.trading_day),
-      sample_size: Number(r.sample_size),
-      avg_excess_pct: Number(r.avg_excess_pct),
-      avg_return_pct: Number(r.avg_return_pct),
-    }));
-    fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify(data));
-    console.log(`[ALPHA DECAY] Done: ${data.length} data points cached`);
+    console.log(`[ALPHA DECAY] Processing ${signals.rows.length} signals...`);
+    if (signals.rows.length === 0) {
+      fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify([]));
+      return;
+    }
+
+    // Step 2: For each trading_day horizon, compute avg return and excess return
+    // Use a single efficient query that computes returns for key horizons
+    const horizons = Array.from({ length: 253 }, (_, i) => i); // 0-252
+    const decayData: any[] = [];
+
+    // Batch process: for each horizon, compute returns across all signals
+    for (const horizon of horizons) {
+      const result = await pool.query(`
+        WITH signal_entries AS (
+          SELECT ps.id as signal_id, ps.issuer_ticker as ticker,
+                 sep.next_open as entry_price, ps.signal_date
+          FROM purchase_signals ps
+          JOIN signal_entry_prices sep ON sep.signal_id = ps.id
+          WHERE sep.next_open > 0 AND ps.issuer_ticker IS NOT NULL
+        ),
+        with_entry_date AS (
+          SELECT se.*, dp.date as entry_date, dp.close as entry_close
+          FROM signal_entries se
+          JOIN LATERAL (
+            SELECT date, close FROM daily_prices 
+            WHERE ticker = se.ticker AND date > se.signal_date 
+            ORDER BY date LIMIT 1
+          ) dp ON true
+        ),
+        with_horizon AS (
+          SELECT wed.signal_id, wed.entry_price, wed.entry_date,
+                 dp_h.close as horizon_close, dp_h.date as horizon_date
+          FROM with_entry_date wed
+          JOIN LATERAL (
+            SELECT close, date FROM daily_prices 
+            WHERE ticker = wed.ticker AND date >= wed.entry_date 
+            ORDER BY date OFFSET $1 LIMIT 1
+          ) dp_h ON true
+        ),
+        with_spy AS (
+          SELECT wh.signal_id, wh.entry_price, wh.horizon_close,
+                 spy_0.close as spy_entry, spy_h.close as spy_horizon
+          FROM with_horizon wh
+          JOIN daily_prices spy_0 ON spy_0.ticker = 'SPY' AND spy_0.date = wh.entry_date
+          JOIN daily_prices spy_h ON spy_h.ticker = 'SPY' AND spy_h.date = wh.horizon_date
+          WHERE spy_0.close > 0
+        )
+        SELECT 
+          COUNT(*) as sample_size,
+          ROUND(AVG(((horizon_close / entry_price) - 1) - ((spy_horizon / spy_entry) - 1)) * 100, 3) as avg_excess_pct,
+          ROUND(AVG((horizon_close / entry_price) - 1) * 100, 3) as avg_return_pct
+        FROM with_spy
+        WHERE horizon_close IS NOT NULL AND entry_price > 0
+      `, [horizon]);
+
+      const row = result.rows[0];
+      if (row && Number(row.sample_size) > 0) {
+        decayData.push({
+          trading_day: horizon,
+          sample_size: Number(row.sample_size),
+          avg_excess_pct: Number(row.avg_excess_pct),
+          avg_return_pct: Number(row.avg_return_pct),
+        });
+      }
+
+      // Log progress every 50 horizons
+      if (horizon > 0 && horizon % 50 === 0) {
+        console.log(`[ALPHA DECAY] Processed horizon ${horizon}/252...`);
+      }
+    }
+
+    fs.writeFileSync(ALPHA_DECAY_CACHE_PATH, JSON.stringify(decayData));
+    console.log(`[ALPHA DECAY] Done: ${decayData.length} data points cached`);
   } catch (err: any) {
     console.error("[ALPHA DECAY] Failed:", err.message);
     throw err;
@@ -282,10 +347,24 @@ export async function getTradeDeviations(limit = 100) {
 export async function getMissedSignals(days = 90) {
   const result = await pool.query(`
     SELECT ps.*, sep.next_open as entry_price,
-      (SELECT ROUND(dfr.excess_from_next_open * 100, 2) FROM daily_forward_returns dfr 
-       WHERE dfr.signal_id = ps.id AND dfr.trading_day = 63 LIMIT 1) as excess_63d_pct,
-      (SELECT ROUND(dfr.return_from_next_open * 100, 2) FROM daily_forward_returns dfr 
-       WHERE dfr.signal_id = ps.id AND dfr.trading_day = 63 LIMIT 1) as return_63d_pct
+      -- 63-day excess return computed from daily_prices
+      (SELECT ROUND(((dp_h.close / sep2.next_open) - 1 - ((spy_h.close / spy_0.close) - 1)) * 100, 2)
+       FROM signal_entry_prices sep2
+       JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date > ps.signal_date ORDER BY date LIMIT 1) dp_0 ON true
+       JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date >= dp_0.date ORDER BY date OFFSET 63 LIMIT 1) dp_h ON true
+       JOIN daily_prices spy_0 ON spy_0.ticker = 'SPY' AND spy_0.date = dp_0.date
+       JOIN daily_prices spy_h ON spy_h.ticker = 'SPY' AND spy_h.date = dp_h.date
+       WHERE sep2.signal_id = ps.id AND sep2.next_open > 0
+       LIMIT 1
+      ) as excess_63d_pct,
+      -- 63-day raw return computed from daily_prices
+      (SELECT ROUND(((dp_h.close / sep2.next_open) - 1) * 100, 2)
+       FROM signal_entry_prices sep2
+       JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date > ps.signal_date ORDER BY date LIMIT 1) dp_0 ON true
+       JOIN LATERAL (SELECT close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date >= dp_0.date ORDER BY date OFFSET 63 LIMIT 1) dp_h ON true
+       WHERE sep2.signal_id = ps.id AND sep2.next_open > 0
+       LIMIT 1
+      ) as return_63d_pct
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
     WHERE ps.score_tier <= 2
@@ -459,8 +538,8 @@ export async function getDataPipelineStatus() {
     pool.query(`SELECT count(*) as count FROM insider_transactions WHERE transaction_type = 'P'`),
     pool.query(`SELECT count(*) as count FROM purchase_signals`),
     pool.query(`SELECT count(DISTINCT signal_id) as count FROM signal_entry_prices`),
-    // Fast approximate count using pg_class for large tables
-    pool.query(`SELECT GREATEST(reltuples::bigint, 0) as count FROM pg_class WHERE relname = 'daily_forward_returns'`).catch(() => ({ rows: [{ count: 0 }] })),
+    // Daily prices count (source of truth for forward return computation)
+    pool.query(`SELECT GREATEST(reltuples::bigint, 0) as count FROM pg_class WHERE relname = 'daily_prices'`).catch(() => ({ rows: [{ count: 0 }] })),
     pool.query(`SELECT count(*) as count FROM factor_analysis`),
     pool.query(`SELECT count(*) as count FROM model_weights`),
     pool.query(`SELECT count(*) as count FROM insider_history`),
@@ -475,7 +554,7 @@ export async function getDataPipelineStatus() {
     totalSignals: totalAll,
     enrichedSignals: enriched,
     failedTickers: Number(failedTickers.rows[0]?.count || 0),
-    forwardReturnDataPoints: Number(fwdReturnApprox.rows[0]?.count || 0),
+    dailyPriceDataPoints: Number(fwdReturnApprox.rows[0]?.count || 0),
     factorAnalysisResults: Number(factorCount.rows[0]?.count || 0),
     modelFactors: Number(weightCount.rows[0]?.count || 0),
     insiderProfiles: Number(insiderCount.rows[0]?.count || 0),

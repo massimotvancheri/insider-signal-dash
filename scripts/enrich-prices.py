@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Market Data Enrichment — Price & Forward Returns
-Fetches historical prices via yfinance for all signal tickers,
-computes forward returns, and stores in PostgreSQL.
+Market Data Enrichment — Price Store & Signal Entry Prices
+Fetches historical prices via yfinance for signal tickers,
+stores in daily_prices table, and computes signal entry prices.
+
+Professional quant pattern: store prices as source of truth,
+compute forward returns on demand from daily_prices.
 
 Usage:
   python3 scripts/enrich-prices.py [max_tickers] [start_year]
@@ -26,7 +29,7 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres@localhost:5432/in
 def get_db():
     conn = psycopg2.connect(DB_URL)
     conn.autocommit = False
-    # Create failed tickers table if not exists
+    # Create helper tables if not exists
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS enrichment_failed_tickers (
@@ -34,6 +37,11 @@ def get_db():
                 fail_count INTEGER DEFAULT 1,
                 last_failed_at TEXT
             )
+        """)
+        # Ensure daily_prices unique constraint
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_prices_ticker_date_uniq 
+            ON daily_prices(ticker, date)
         """)
     conn.commit()
     return conn
@@ -69,6 +77,50 @@ def mark_ticker_failed(conn, ticker):
         """, (ticker, datetime.now().isoformat(), datetime.now().isoformat()))
     conn.commit()
 
+def store_daily_prices(conn, ticker, prices):
+    """Store daily OHLCV prices into daily_prices table (idempotent via ON CONFLICT)."""
+    if not prices:
+        return 0
+    
+    rows = [(ticker, p["date"], p.get("open"), p.get("high"), p.get("low"), 
+             p["close"], p.get("volume")) for p in prices]
+    
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(cur, """
+            INSERT INTO daily_prices (ticker, date, open, high, low, close, volume)
+            VALUES %s
+            ON CONFLICT (ticker, date) DO UPDATE SET
+              open = COALESCE(EXCLUDED.open, daily_prices.open),
+              high = COALESCE(EXCLUDED.high, daily_prices.high),
+              low = COALESCE(EXCLUDED.low, daily_prices.low),
+              close = EXCLUDED.close,
+              volume = COALESCE(EXCLUDED.volume, daily_prices.volume)
+        """, rows, page_size=500)
+    return len(rows)
+
+def store_spy_prices(conn, spy_data):
+    """Store SPY benchmark prices into daily_prices table."""
+    rows = [("SPY", date, d.get("open"), d.get("high"), d.get("low"), 
+             d["close"], d.get("volume")) 
+            for date, d in spy_data.items() if d.get("close", 0) > 0]
+    
+    if not rows:
+        return 0
+    
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(cur, """
+            INSERT INTO daily_prices (ticker, date, open, high, low, close, volume)
+            VALUES %s
+            ON CONFLICT (ticker, date) DO UPDATE SET
+              open = COALESCE(EXCLUDED.open, daily_prices.open),
+              high = COALESCE(EXCLUDED.high, daily_prices.high),
+              low = COALESCE(EXCLUDED.low, daily_prices.low),
+              close = EXCLUDED.close,
+              volume = COALESCE(EXCLUDED.volume, daily_prices.volume)
+        """, rows, page_size=500)
+    conn.commit()
+    return len(rows)
+
 def fetch_spy_data():
     """Fetch SPY benchmark data for the full period."""
     print("[SPY] Fetching benchmark data (2015-2026)...")
@@ -86,6 +138,8 @@ def fetch_spy_data():
         date_str = idx.strftime("%Y-%m-%d")
         result[date_str] = {
             "open": float(row.get("Open", 0)),
+            "high": float(row.get("High", 0)),
+            "low": float(row.get("Low", 0)),
             "close": float(row.get("Close", 0)),
             "volume": float(row.get("Volume", 0)),
         }
@@ -127,8 +181,9 @@ def fetch_ticker_prices(ticker, start_date, end_date, max_retries=2):
             continue
     return []
 
-def compute_forward_returns(conn, signal, prices, spy_data):
-    """Compute and store entry prices + daily forward returns for a signal."""
+def compute_entry_prices(conn, signal, prices, spy_data):
+    """Compute and store entry prices for a signal.
+    Prices are already stored in daily_prices — we just compute entry reference points."""
     signal_id = signal["id"]
     filing_date = signal["signal_date"]
     insider_tx_price = signal["avg_purchase_price"] or 0
@@ -195,46 +250,9 @@ def compute_forward_returns(conn, signal, prices, spy_data):
             datetime.now().isoformat()
         ))
     
-    # Compute daily forward returns (day 0 through 252)
-    forward_prices = [p for p in prices if p["date"] >= filing_date]
-    forward_prices.sort(key=lambda p: p["date"])
-    
-    entry_date = next_open_day["date"]
-    spy_entry = spy_data.get(entry_date, {})
-    spy_entry_close = spy_entry.get("close", 0)
-    
-    rows_to_insert = []
-    for d_idx, day_price in enumerate(forward_prices[:253]):
-        if entry_open <= 0:
-            continue
-        
-        ret_from_open = (day_price["close"] / entry_open) - 1
-        
-        spy_day = spy_data.get(day_price["date"], {})
-        spy_close = spy_day.get("close", 0)
-        bench_ret = (spy_close / spy_entry_close - 1) if spy_entry_close > 0 and spy_close > 0 else None
-        
-        excess = (ret_from_open - bench_ret) if bench_ret is not None else None
-        
-        rows_to_insert.append((
-            signal_id, d_idx, day_price["date"],
-            day_price["close"],
-            spy_close if spy_close > 0 else None,
-            ret_from_open, None,  # AH entry return
-            excess, None,  # AH excess
-        ))
-    
-    if rows_to_insert:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(cur, """
-                INSERT INTO daily_forward_returns
-                (signal_id, trading_day, calendar_date, close_price, benchmark_close,
-                 return_from_next_open, return_from_ah_entry, excess_from_next_open, excess_from_ah_entry)
-                VALUES %s
-            """, rows_to_insert)
-    
-    # Update transaction records with market context
+    # Enrich insider_transactions with market context data
     updates = {}
+    
     if price_drift is not None:
         updates["price_drift_from_tx"] = price_drift
     
@@ -293,9 +311,17 @@ def main():
         print("ERROR: Could not fetch SPY data. Aborting.")
         return
     
+    # Store SPY prices in daily_prices
+    spy_stored = store_spy_prices(conn, spy_data)
+    print(f"[SPY] Stored {spy_stored} days in daily_prices\n")
+    
     # Get signals to enrich
     signals = get_signals_to_enrich(conn, start_year, max_tickers * 10)
     print(f"[signals] {len(signals)} signals to enrich")
+    
+    if len(signals) == 0:
+        print("0 signals to enrich — all done!")
+        return
     
     # Group by ticker
     by_ticker = {}
@@ -310,7 +336,7 @@ def main():
     
     success_count = 0
     fail_count = 0
-    total_fwd_days = 0
+    prices_stored = 0
     
     for i, ticker in enumerate(tickers):
         ticker_signals = by_ticker[ticker]
@@ -330,14 +356,18 @@ def main():
                 print(f"  [{i+1}/{len(tickers)}] {ticker}: no data | Total: {success_count} enriched, {fail_count} failed")
             continue
         
+        # Store prices in daily_prices table (idempotent)
+        stored = store_daily_prices(conn, ticker, prices)
+        prices_stored += stored
+        
         # Rate limit
         time.sleep(0.15)
         
-        # Enrich each signal
+        # Compute entry prices for each signal
         ticker_success = 0
         for sig in ticker_signals:
             try:
-                ok = compute_forward_returns(conn, sig, prices, spy_data)
+                ok = compute_entry_prices(conn, sig, prices, spy_data)
                 if ok:
                     success_count += 1
                     ticker_success += 1
@@ -353,7 +383,7 @@ def main():
         if (i + 1) % 10 == 0:
             conn.commit()
             pct = ((i + 1) / len(tickers)) * 100
-            print(f"  [{i+1}/{len(tickers)}] ({pct:.1f}%) | {success_count} enriched, {fail_count} failed")
+            print(f"  [{i+1}/{len(tickers)}] ({pct:.1f}%) | {success_count} enriched, {fail_count} failed, {prices_stored} price rows stored")
     
     conn.commit()
     
@@ -361,15 +391,17 @@ def main():
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM signal_entry_prices")
         entry_count = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM daily_forward_returns")
-        fwd_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM daily_prices")
+        price_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(DISTINCT ticker) FROM daily_prices")
+        ticker_count = cur.fetchone()[0]
     
     print(f"\n=== Enrichment Complete ===")
     print(f"Tickers processed: {len(tickers)}")
     print(f"Signals enriched: {success_count}")
     print(f"Failed tickers: {fail_count}")
     print(f"Entry price records: {entry_count}")
-    print(f"Forward return data points: {fwd_count}")
+    print(f"Daily price rows: {price_count} ({ticker_count} tickers)")
     
     conn.close()
 

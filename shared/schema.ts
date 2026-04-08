@@ -129,18 +129,17 @@ export const signalEntryPrices = pgTable("signal_entry_prices", {
   createdAt: text("created_at").notNull(),
 });
 
-// Daily forward returns — full daily series for every signal (day 0-252)
-export const dailyForwardReturns = pgTable("daily_forward_returns", {
+// Daily prices — OHLCV source of truth for all return computations
+// Forward returns are computed on demand from this table (professional quant pattern)
+export const dailyPrices = pgTable("daily_prices", {
   id: serial("id").primaryKey(),
-  signalId: integer("signal_id").notNull(),
-  tradingDay: integer("trading_day").notNull(),         // 0, 1, 2, ... 252
-  calendarDate: text("calendar_date").notNull(),
-  closePrice: doublePrecision("close_price"),
-  benchmarkClose: doublePrecision("benchmark_close"),              // SPY close
-  returnFromNextOpen: doublePrecision("return_from_next_open"),    // Cumulative return from next-open entry
-  returnFromAhEntry: doublePrecision("return_from_ah_entry"),     // Cumulative return from AH entry
-  excessFromNextOpen: doublePrecision("excess_from_next_open"),   // Return minus benchmark
-  excessFromAhEntry: doublePrecision("excess_from_ah_entry"),
+  ticker: text("ticker").notNull(),
+  date: text("date").notNull(),                         // YYYY-MM-DD
+  open: doublePrecision("open"),
+  high: doublePrecision("high"),
+  low: doublePrecision("low"),
+  close: doublePrecision("close").notNull(),
+  volume: doublePrecision("volume"),
 });
 
 // Factor analysis results — computed statistics for each factor slice
@@ -391,7 +390,7 @@ export const insertSnapshotSchema = createInsertSchema(strategySnapshots).omit({
 export const insertClosedTradeSchema = createInsertSchema(closedTrades).omit({ id: true });
 export const insertSchwabConfigSchema = createInsertSchema(schwabConfig).omit({ id: true });
 export const insertEntryPriceSchema = createInsertSchema(signalEntryPrices).omit({ id: true });
-export const insertForwardReturnSchema = createInsertSchema(dailyForwardReturns).omit({ id: true });
+export const insertDailyPriceSchema = createInsertSchema(dailyPrices).omit({ id: true });
 export const insertFactorAnalysisSchema = createInsertSchema(factorAnalysis).omit({ id: true });
 export const insertModelWeightSchema = createInsertSchema(modelWeights).omit({ id: true });
 export const insertInsiderHistorySchema = createInsertSchema(insiderHistory).omit({ id: true });
@@ -417,8 +416,8 @@ export type ClosedTrade = typeof closedTrades.$inferSelect;
 export type SchwabConfig = typeof schwabConfig.$inferSelect;
 export type SignalEntryPrice = typeof signalEntryPrices.$inferSelect;
 export type InsertEntryPrice = z.infer<typeof insertEntryPriceSchema>;
-export type DailyForwardReturn = typeof dailyForwardReturns.$inferSelect;
-export type InsertForwardReturn = z.infer<typeof insertForwardReturnSchema>;
+export type DailyPrice = typeof dailyPrices.$inferSelect;
+export type InsertDailyPrice = z.infer<typeof insertDailyPriceSchema>;
 export type FactorAnalysisRow = typeof factorAnalysis.$inferSelect;
 export type InsertFactorAnalysis = z.infer<typeof insertFactorAnalysisSchema>;
 export type ModelWeight = typeof modelWeights.$inferSelect;

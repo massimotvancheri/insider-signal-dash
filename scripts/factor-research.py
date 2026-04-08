@@ -2,9 +2,13 @@
 """
 Factor Research Engine
 
-For every measurable factor dimension, slices forward returns and computes:
+For every measurable factor dimension, computes forward excess returns
+from the daily_prices table (professional quant pattern: prices are source
+of truth, returns computed on demand via SQL).
+
+Metrics per factor slice:
 - Mean excess return
-- Median excess return
+- Median excess return  
 - Standard deviation
 - t-statistic
 - Win rate
@@ -29,8 +33,7 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres@localhost:5432/in
 # Horizons to analyze (trading days from filing)
 HORIZONS = [1, 2, 3, 5, 10, 21, 42, 63, 126, 252]
 
-# Use signal_entry_prices instead of scanning 47M+ daily_forward_returns
-# for the enriched signal set. Much faster.
+# Only analyze signals that have entry prices (enriched)
 ENRICHED_SIGNAL_FILTER = "ps.id IN (SELECT signal_id FROM signal_entry_prices)"
 
 def get_db():
@@ -72,7 +75,8 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
     - slice_name: the factor slice label
     - signal_id: the signal ID
     
-    We join with daily_forward_returns to get excess returns at each horizon.
+    Forward returns are computed on demand from daily_prices using LATERAL joins.
+    Professional quant pattern: prices are source of truth.
     """
     print(f"\n  [{factor_name}] Analyzing...")
     
@@ -95,10 +99,9 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
     slices = set(signal_slices.values())
     print(f"  [{factor_name}] {len(signal_slices)} signals across {len(slices)} slices: {sorted(slices)}")
     
-    # For each horizon, get excess returns grouped by slice
+    # For each horizon, compute excess returns from daily_prices on demand
     results_count = 0
     for horizon in HORIZONS:
-        # Fetch excess returns for this horizon
         signal_ids = list(signal_slices.keys())
         
         # Build query in batches to avoid memory issues
@@ -109,12 +112,66 @@ def analyze_factor(conn, factor_name, sql_query, slice_labels=None):
             batch = signal_ids[i:i+batch_size]
             placeholders = ",".join(["%s"] * len(batch))
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Compute excess return on demand from daily_prices:
+                # 1. Get entry price (next_open) from signal_entry_prices
+                # 2. Get the Nth trading day close from daily_prices
+                # 3. Get SPY benchmark close for same dates
+                # 4. excess = stock_return - benchmark_return
                 cur.execute(f"""
-                    SELECT signal_id, excess_from_next_open
-                    FROM daily_forward_returns
-                    WHERE signal_id IN ({placeholders}) AND trading_day = %s
-                    AND excess_from_next_open IS NOT NULL
-                """, batch + [horizon])
+                    WITH signal_returns AS (
+                        SELECT
+                            sep.signal_id,
+                            ps.issuer_ticker,
+                            sep.next_open AS entry_price,
+                            ps.signal_date,
+                            -- Get the Nth trading day close
+                            fwd.close AS fwd_close,
+                            -- Get benchmark (SPY) prices
+                            spy_entry.close AS spy_entry_close,
+                            spy_fwd.close AS spy_fwd_close
+                        FROM signal_entry_prices sep
+                        JOIN purchase_signals ps ON ps.id = sep.signal_id
+                        -- Nth trading day price for this ticker
+                        CROSS JOIN LATERAL (
+                            SELECT dp.close
+                            FROM daily_prices dp
+                            WHERE dp.ticker = ps.issuer_ticker
+                              AND dp.date > ps.signal_date
+                            ORDER BY dp.date
+                            OFFSET %s - 1
+                            LIMIT 1
+                        ) fwd
+                        -- SPY entry price (day after signal)
+                        CROSS JOIN LATERAL (
+                            SELECT dp.close
+                            FROM daily_prices dp
+                            WHERE dp.ticker = 'SPY'
+                              AND dp.date > ps.signal_date
+                            ORDER BY dp.date
+                            LIMIT 1
+                        ) spy_entry
+                        -- SPY Nth trading day price
+                        CROSS JOIN LATERAL (
+                            SELECT dp.close
+                            FROM daily_prices dp
+                            WHERE dp.ticker = 'SPY'
+                              AND dp.date > ps.signal_date
+                            ORDER BY dp.date
+                            OFFSET %s - 1
+                            LIMIT 1
+                        ) spy_fwd
+                        WHERE sep.signal_id IN ({placeholders})
+                          AND sep.next_open IS NOT NULL
+                          AND sep.next_open > 0
+                    )
+                    SELECT
+                        signal_id,
+                        (fwd_close / entry_price - 1) - (spy_fwd_close / spy_entry_close - 1) AS excess_from_next_open
+                    FROM signal_returns
+                    WHERE fwd_close IS NOT NULL
+                      AND spy_entry_close IS NOT NULL AND spy_entry_close > 0
+                      AND spy_fwd_close IS NOT NULL
+                """, [horizon, horizon] + batch)
                 
                 for row in cur:
                     sid = row["signal_id"]

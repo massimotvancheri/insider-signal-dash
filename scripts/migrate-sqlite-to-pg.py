@@ -3,7 +3,13 @@
 SQLite → PostgreSQL Data Migration
 
 Migrates all data from data.db (SQLite) to insider_signal (PostgreSQL).
-Handles the large daily_forward_returns table (~50M rows) in batches.
+
+KEY CHANGE: Instead of migrating the 57.5M-row daily_forward_returns table,
+we extract unique (ticker, date, close) tuples into the new daily_prices table.
+This is the professional quant pattern — store prices as source of truth,
+compute forward returns on demand via SQL LATERAL joins.
+
+Expected data reduction: ~57.5M rows → ~5M rows (~90% smaller)
 
 Usage:
   python3 scripts/migrate-sqlite-to-pg.py
@@ -21,6 +27,7 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "data.db")
 PG_URL = os.environ.get("DATABASE_URL", "postgresql://postgres@localhost:5432/insider_signal")
 
 # Tables to migrate, in dependency order
+# NOTE: daily_forward_returns is NOT migrated — replaced by daily_prices extraction
 TABLES = [
     {
         "name": "insider_transactions",
@@ -68,16 +75,7 @@ TABLES = [
             "ah_net_premium", "insider_tx_price", "created_at"
         ],
     },
-    {
-        "name": "daily_forward_returns",
-        "sqlite_query": "SELECT * FROM daily_forward_returns",
-        "pg_columns": [
-            "id", "signal_id", "trading_day", "calendar_date", "close_price",
-            "benchmark_close", "return_from_next_open", "return_from_ah_entry",
-            "excess_from_next_open", "excess_from_ah_entry"
-        ],
-        "batch_size": 50000,  # Large table — migrate in bigger batches
-    },
+    # daily_forward_returns is NOT migrated — replaced by daily_prices extraction below
     {
         "name": "factor_analysis",
         "sqlite_query": "SELECT * FROM factor_analysis",
@@ -219,7 +217,7 @@ def migrate_table(sqlite_conn, pg_conn, table_config, batch_size=10000):
     # Build column mapping — match by position
     col_count = min(len(sqlite_columns), len(pg_columns))
     
-    # Migrate in batches using COPY for speed
+    # Migrate in batches using execute_batch for speed
     migrated = 0
     offset = 0
     start_time = time.time()
@@ -271,6 +269,167 @@ def migrate_table(sqlite_conn, pg_conn, table_config, batch_size=10000):
     return migrated
 
 
+def extract_daily_prices(sqlite_conn, pg_conn):
+    """
+    Extract unique (ticker, date, close) from SQLite daily_forward_returns
+    into the new daily_prices table.
+    
+    The old table has ~57.5M rows with many duplicates per (ticker, date).
+    We extract unique price points — expected ~5M rows.
+    
+    Also extracts SPY benchmark prices from the benchmark_close column.
+    """
+    print("\n" + "=" * 60)
+    print("  Extracting daily_prices from daily_forward_returns")
+    print("=" * 60)
+    
+    # First, ensure daily_prices table exists
+    with pg_conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS daily_prices (
+                id SERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open DOUBLE PRECISION,
+                high DOUBLE PRECISION,
+                low DOUBLE PRECISION,
+                close DOUBLE PRECISION NOT NULL,
+                volume DOUBLE PRECISION
+            )
+        """)
+        cur.execute("TRUNCATE daily_prices")
+        # Create unique constraint for upserts
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_prices_ticker_date 
+            ON daily_prices(ticker, date)
+        """)
+    pg_conn.commit()
+    
+    # Check if daily_forward_returns exists in SQLite
+    try:
+        total = sqlite_conn.execute("SELECT COUNT(*) FROM daily_forward_returns").fetchone()[0]
+    except Exception:
+        print("  daily_forward_returns not found in SQLite, skipping")
+        return 0
+    
+    print(f"  Source: {total:,} rows in daily_forward_returns")
+    
+    # Step 1: Extract unique stock prices
+    # Group by signal → get ticker from purchase_signals, then deduplicate
+    print("\n  [Step 1] Extracting unique stock prices...")
+    
+    # We need to join with purchase_signals to get the ticker for each signal
+    # Then extract unique (ticker, date, close) combinations
+    start_time = time.time()
+    
+    # Get distinct signal_ids and their tickers
+    ticker_map = {}
+    rows = sqlite_conn.execute("""
+        SELECT DISTINCT dfr.signal_id, ps.issuer_ticker
+        FROM daily_forward_returns dfr
+        JOIN purchase_signals ps ON ps.id = dfr.signal_id
+        WHERE ps.issuer_ticker IS NOT NULL
+    """).fetchall()
+    
+    for row in rows:
+        ticker_map[row[0]] = row[1]
+    
+    print(f"  Found {len(ticker_map):,} signals across unique tickers")
+    
+    # Extract unique (ticker, date, close) in batches
+    # Process by signal to build the deduplicated price dataset
+    batch_size = 100000
+    offset = 0
+    price_buffer = {}  # (ticker, date) -> close
+    spy_buffer = {}    # date -> close (from benchmark_close)
+    
+    while offset < total:
+        rows = sqlite_conn.execute(f"""
+            SELECT signal_id, calendar_date, close_price, benchmark_close
+            FROM daily_forward_returns
+            WHERE close_price IS NOT NULL
+            LIMIT {batch_size} OFFSET {offset}
+        """).fetchall()
+        
+        if not rows:
+            break
+        
+        for row in rows:
+            signal_id, cal_date, close_price, benchmark_close = row
+            
+            if signal_id in ticker_map and cal_date:
+                ticker = ticker_map[signal_id]
+                key = (ticker, cal_date)
+                if key not in price_buffer:
+                    price_buffer[key] = close_price
+                
+                # Also capture SPY benchmark prices
+                if benchmark_close and cal_date not in spy_buffer:
+                    spy_buffer[cal_date] = benchmark_close
+        
+        offset += batch_size
+        elapsed = time.time() - start_time
+        pct = min(100, (offset / total) * 100)
+        print(f"  Scanned {min(offset, total):,}/{total:,} ({pct:.1f}%) — "
+              f"{len(price_buffer):,} stock prices, {len(spy_buffer):,} SPY prices")
+    
+    # Add SPY prices to buffer
+    for date, close in spy_buffer.items():
+        price_buffer[("SPY", date)] = close
+    
+    total_prices = len(price_buffer)
+    print(f"\n  Total unique prices to insert: {total_prices:,}")
+    print(f"  Compression ratio: {total:,} → {total_prices:,} ({total_prices/total*100:.1f}%)")
+    
+    # Step 2: Bulk insert into daily_prices
+    print("\n  [Step 2] Inserting into daily_prices...")
+    
+    insert_sql = """
+        INSERT INTO daily_prices (ticker, date, close) 
+        VALUES (%s, %s, %s)
+        ON CONFLICT (ticker, date) DO NOTHING
+    """
+    
+    items = list(price_buffer.items())
+    inserted = 0
+    insert_batch = 5000
+    start_time = time.time()
+    
+    for i in range(0, len(items), insert_batch):
+        batch = items[i:i+insert_batch]
+        rows = [(ticker, date, close) for (ticker, date), close in batch]
+        
+        with pg_conn.cursor() as cur:
+            psycopg2.extras.execute_batch(cur, insert_sql, rows, page_size=1000)
+        pg_conn.commit()
+        
+        inserted += len(batch)
+        elapsed = time.time() - start_time
+        rate = inserted / elapsed if elapsed > 0 else 0
+        pct = (inserted / total_prices) * 100
+        print(f"  Inserted {inserted:,}/{total_prices:,} ({pct:.1f}%) — {rate:.0f} rows/sec")
+    
+    # Create additional indexes
+    print("\n  [Step 3] Creating indexes...")
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker ON daily_prices(ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)")
+    pg_conn.commit()
+    
+    # Reset sequence
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT MAX(id) FROM daily_prices")
+        max_id = cur.fetchone()[0]
+        if max_id:
+            cur.execute(f"SELECT setval('daily_prices_id_seq', {max_id})")
+    pg_conn.commit()
+    
+    elapsed = time.time() - start_time
+    print(f"\n  daily_prices extraction complete: {inserted:,} rows in {elapsed:.1f}s")
+    
+    return inserted
+
+
 def create_pg_schema(pg_conn):
     """Create PostgreSQL tables using the schema from create-pg-schema.sql if it exists."""
     schema_path = os.path.join(os.path.dirname(__file__), "..", "create-pg-schema.sql")
@@ -290,8 +449,11 @@ def create_indexes(pg_conn):
     """Create performance indexes after data migration."""
     print("\n[INDEXES] Creating performance indexes...")
     indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_dfr_signal_day ON daily_forward_returns(signal_id, trading_day)",
-        "CREATE INDEX IF NOT EXISTS idx_dfr_trading_day ON daily_forward_returns(trading_day)",
+        # daily_prices indexes (replacing daily_forward_returns indexes)
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_prices_ticker_date ON daily_prices(ticker, date)",
+        "CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker ON daily_prices(ticker)",
+        "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date)",
+        # Standard indexes
         "CREATE INDEX IF NOT EXISTS idx_it_ticker_date ON insider_transactions(issuer_ticker, filing_date)",
         "CREATE INDEX IF NOT EXISTS idx_it_tx_type ON insider_transactions(transaction_type)",
         "CREATE INDEX IF NOT EXISTS idx_it_accession ON insider_transactions(accession_number)",
@@ -323,6 +485,7 @@ def create_indexes(pg_conn):
 def main():
     print("=" * 60)
     print("  SQLite → PostgreSQL Data Migration")
+    print("  (daily_prices extraction mode)")
     print("=" * 60)
     print(f"\n  SQLite: {SQLITE_PATH}")
     print(f"  PostgreSQL: {PG_URL}\n")
@@ -342,7 +505,7 @@ def main():
             cur.execute(extra["create_sql"])
         pg_conn.commit()
     
-    # Migrate each table
+    # Migrate each standard table (NOT daily_forward_returns)
     total_rows = 0
     start_time = time.time()
     
@@ -362,6 +525,10 @@ def main():
         except Exception as e:
             print(f"  [{extra['name']}] ERROR: {e}")
             pg_conn.rollback()
+    
+    # Extract daily_prices from daily_forward_returns
+    price_rows = extract_daily_prices(sqlite_conn, pg_conn)
+    total_rows += price_rows
     
     # Create indexes
     create_indexes(pg_conn)
@@ -391,6 +558,16 @@ def main():
         status = "✓" if sqlite_count == pg_count else "✗ MISMATCH"
         if sqlite_count > 0 or pg_count > 0:
             print(f"    {name:35s} SQLite: {sqlite_count:>12,} | PG: {pg_count:>12,} {status}")
+    
+    # Show daily_prices extraction result
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM daily_prices")
+        dp_count = cur.fetchone()[0]
+    try:
+        dfr_count = sqlite_conn.execute("SELECT COUNT(*) FROM daily_forward_returns").fetchone()[0]
+    except:
+        dfr_count = 0
+    print(f"    {'daily_prices (from forward_returns)':35s} SQLite: {dfr_count:>12,} | PG: {dp_count:>12,} (extracted)")
     
     sqlite_conn.close()
     pg_conn.close()

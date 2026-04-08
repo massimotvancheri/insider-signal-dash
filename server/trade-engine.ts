@@ -356,15 +356,26 @@ export async function getEnhancedMissedSignals(days = 90, minScore = 70) {
     SELECT ps.id, ps.issuer_ticker, ps.issuer_name, ps.signal_date,
            ps.signal_score, ps.score_tier, ps.cluster_size, ps.total_purchase_value,
            sep.next_open as entry_price, sep.prior_close,
-           (SELECT ROUND(dfr.excess_from_next_open * 100, 2)
-            FROM daily_forward_returns dfr
-            WHERE dfr.signal_id = ps.id AND dfr.trading_day = 63 LIMIT 1) as excess_63d_pct,
-           (SELECT ROUND(dfr.return_from_next_open * 100, 2)
-            FROM daily_forward_returns dfr
-            WHERE dfr.signal_id = ps.id AND dfr.trading_day = 63 LIMIT 1) as return_63d_pct,
-           (SELECT ROUND(dfr.return_from_next_open * 100, 2)
-            FROM daily_forward_returns dfr
-            WHERE dfr.signal_id = ps.id AND dfr.trading_day = 21 LIMIT 1) as return_21d_pct
+           -- 63-day excess return from daily_prices
+           (SELECT ROUND(((dp_h.close / sep2.next_open) - 1 - ((spy_h.close / spy_0.close) - 1)) * 100, 2)
+            FROM signal_entry_prices sep2
+            JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date > ps.signal_date ORDER BY date LIMIT 1) dp_0 ON true
+            JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date >= dp_0.date ORDER BY date OFFSET 63 LIMIT 1) dp_h ON true
+            JOIN daily_prices spy_0 ON spy_0.ticker = 'SPY' AND spy_0.date = dp_0.date
+            JOIN daily_prices spy_h ON spy_h.ticker = 'SPY' AND spy_h.date = dp_h.date
+            WHERE sep2.signal_id = ps.id AND sep2.next_open > 0 LIMIT 1) as excess_63d_pct,
+           -- 63-day raw return from daily_prices
+           (SELECT ROUND(((dp_h.close / sep2.next_open) - 1) * 100, 2)
+            FROM signal_entry_prices sep2
+            JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date > ps.signal_date ORDER BY date LIMIT 1) dp_0 ON true
+            JOIN LATERAL (SELECT close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date >= dp_0.date ORDER BY date OFFSET 63 LIMIT 1) dp_h ON true
+            WHERE sep2.signal_id = ps.id AND sep2.next_open > 0 LIMIT 1) as return_63d_pct,
+           -- 21-day raw return from daily_prices
+           (SELECT ROUND(((dp_h.close / sep2.next_open) - 1) * 100, 2)
+            FROM signal_entry_prices sep2
+            JOIN LATERAL (SELECT date, close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date > ps.signal_date ORDER BY date LIMIT 1) dp_0 ON true
+            JOIN LATERAL (SELECT close FROM daily_prices WHERE ticker = ps.issuer_ticker AND date >= dp_0.date ORDER BY date OFFSET 21 LIMIT 1) dp_h ON true
+            WHERE sep2.signal_id = ps.id AND sep2.next_open > 0 LIMIT 1) as return_21d_pct
     FROM purchase_signals ps
     LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
     WHERE ps.signal_score >= $1
