@@ -266,7 +266,13 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     }
     
     let xmlUrl = xmlMatch[1];
-    if (!xmlUrl.startsWith("http")) {
+    if (xmlUrl.startsWith("http")) {
+      // Already absolute URL
+    } else if (xmlUrl.startsWith("/")) {
+      // Absolute path from server root
+      xmlUrl = `https://www.sec.gov${xmlUrl}`;
+    } else {
+      // Relative filename — prepend full archive path
       xmlUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(cikPrefix)}/${accessionPath}/${xmlUrl}`;
     }
     
