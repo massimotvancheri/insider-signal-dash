@@ -230,6 +230,9 @@ async function pollPredictions(): Promise<string[]> {
 // FILING PROCESSING
 // ============================================================
 
+// Track failure reasons for diagnostics
+const processingStats = { indexFail: 0, noXmlLink: 0, xmlFail: 0, noTx: 0, noPurchase: 0, dbError: 0, exception: 0, success: 0 };
+
 async function processNewFiling(accession: string, source: "efts" | "prediction"): Promise<void> {
   // Fetch the full Form 4 XML
   const accessionPath = accession.replace(/-/g, "");
@@ -244,12 +247,23 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
       signal: AbortSignal.timeout(5000),
     });
     
-    if (!indexResp.ok) return;
+    if (!indexResp.ok) {
+      processingStats.indexFail++;
+      // Log first few failures and then every 50th
+      if (processingStats.indexFail <= 3 || processingStats.indexFail % 50 === 0) {
+        console.log(`[POLLER] Index fetch failed: ${indexResp.status} for ${accession} (${processingStats.indexFail} total)`);
+      }
+      return;
+    }
     const indexHtml = await indexResp.text();
     
     // Find the XML filing link
     const xmlMatch = indexHtml.match(/href="([^"]*\.xml)"/i);
-    if (!xmlMatch) return;
+    if (!xmlMatch) {
+      processingStats.noXmlLink++;
+      if (processingStats.noXmlLink <= 3) console.log(`[POLLER] No XML link in index for ${accession}`);
+      return;
+    }
     
     let xmlUrl = xmlMatch[1];
     if (!xmlUrl.startsWith("http")) {
@@ -264,18 +278,28 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
       signal: AbortSignal.timeout(5000),
     });
     
-    if (!xmlResp.ok) return;
+    if (!xmlResp.ok) {
+      processingStats.xmlFail++;
+      if (processingStats.xmlFail <= 3) console.log(`[POLLER] XML fetch failed: ${xmlResp.status} for ${accession}`);
+      return;
+    }
     const xml = await xmlResp.text();
     
     // Parse the Form 4 XML (reuse V2 parsing logic)
     const transactions = parseForm4Xml(xml, accession);
     
-    if (transactions.length === 0) return;
+    if (transactions.length === 0) {
+      processingStats.noTx++;
+      return;
+    }
     
     // Filter to purchases only
     const purchases = transactions.filter(t => t.transactionType === "P" && (t.totalValue || 0) > 0);
     
-    if (purchases.length === 0) return;
+    if (purchases.length === 0) {
+      processingStats.noPurchase++;
+      return; // Not a purchase — normal, most Form 4s are sells/options
+    }
     
     // Insert into database
     for (const tx of purchases) {
@@ -284,11 +308,13 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
           ...tx,
           createdAt: new Date().toISOString(),
         }).run();
-      } catch {
-        // Likely duplicate, skip
+      } catch (e: any) {
+        processingStats.dbError++;
+        if (processingStats.dbError <= 3) console.log(`[POLLER] DB insert error: ${e.message} for ${accession}`);
       }
     }
     
+    processingStats.success++;
     stats.newFilingsDetected++;
     stats.purchaseSignals += purchases.length;
     stats.lastDetection = new Date().toISOString();
@@ -299,8 +325,9 @@ async function processNewFiling(accession: string, source: "efts" | "prediction"
     const value = purchases.reduce((s, t) => s + (t.totalValue || 0), 0);
     console.log(`  [${source}] NEW PURCHASE: ${ticker} | ${purchases[0].reportingPersonName} | $${(value / 1000).toFixed(0)}K | ${accession}`);
     
-  } catch (err) {
-    // Silently continue — individual filing failures are expected
+  } catch (err: any) {
+    processingStats.exception++;
+    if (processingStats.exception <= 5) console.log(`[POLLER] Exception processing ${accession}: ${err.message}`);
   }
 }
 
@@ -544,5 +571,6 @@ export function getV3PollingStatus() {
       agentSequencesTracked: agentSequences.size,
       uptime: Math.round((Date.now() - new Date(stats.startedAt).getTime()) / 1000 / 60) + " min",
     },
+    processingStats,
   };
 }
