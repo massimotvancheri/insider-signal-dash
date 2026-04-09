@@ -48,18 +48,21 @@ def get_db():
 
 def get_signals_to_enrich(conn, start_year=2020, max_signals=5000):
     """Get signals that need enrichment, prioritized by score and recency.
+    Uses LEFT JOIN (not NOT IN) for performance — critical with 200K+ entry prices.
     Excludes tickers that have permanently failed (no data on Yahoo Finance)."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT ps.id, ps.issuer_ticker, ps.signal_date, ps.signal_score, ps.avg_purchase_price
             FROM purchase_signals ps
+            LEFT JOIN signal_entry_prices sep ON sep.signal_id = ps.id
+            LEFT JOIN enrichment_failed_tickers eft ON eft.ticker = ps.issuer_ticker
             WHERE ps.issuer_ticker IS NOT NULL
               AND ps.issuer_ticker != ''
               AND ps.issuer_ticker != 'NONE'
               AND ps.issuer_ticker != 'N/A'
               AND ps.signal_date >= %s
-              AND ps.id NOT IN (SELECT signal_id FROM signal_entry_prices)
-              AND ps.issuer_ticker NOT IN (SELECT ticker FROM enrichment_failed_tickers)
+              AND sep.signal_id IS NULL
+              AND eft.ticker IS NULL
             ORDER BY ps.signal_score DESC, ps.signal_date DESC
             LIMIT %s
         """, (f"{start_year}-01-01", max_signals))
@@ -232,13 +235,14 @@ def compute_entry_prices(conn, signal, prices, spy_data):
     if insider_tx_price > 0 and prior_close and prior_close["close"] > 0:
         price_drift = (prior_close["close"] / insider_tx_price) - 1
     
-    # Save entry prices
+    # Save entry prices (skip duplicates gracefully)
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO signal_entry_prices 
             (signal_id, filing_timestamp, prior_close, ah_price, ah_spread_pct,
              next_open, next_vwap, overnight_gap, ah_net_premium, insider_tx_price, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
         """, (
             signal_id, None,
             prior_close["close"] if prior_close else None,
