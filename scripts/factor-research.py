@@ -293,8 +293,8 @@ def run_all_analyses(conn):
                 WHEN it.reporting_person_title LIKE '%%CFO%%' OR it.reporting_person_title LIKE '%%Chief Financial%%' THEN 'CFO'
                 WHEN it.reporting_person_title LIKE '%%COO%%' OR it.reporting_person_title LIKE '%%Chief Operating%%' THEN 'COO'
                 WHEN it.reporting_person_title LIKE '%%Chief%%' OR it.reporting_person_title LIKE '%%President%%' THEN 'Other C-Suite'
-                WHEN it.is_director = 1 AND it.is_officer = 0 THEN 'Director'
-                WHEN it.is_ten_percent_owner = 1 THEN '10%% Owner'
+                WHEN it.is_director = true AND it.is_officer = false THEN 'Director'
+                WHEN it.is_ten_percent_owner = true THEN '10%% Owner'
                 ELSE 'Other Officer'
             END as slice_name
         FROM purchase_signals ps
