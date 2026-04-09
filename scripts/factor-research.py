@@ -503,9 +503,9 @@ def main():
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT factor_name, slice_name, sample_size,
-                ROUND(mean_excess_return * 100, 2) as mean_pct,
+                ROUND((mean_excess_return * 100)::numeric, 2) as mean_pct,
                 ROUND(t_stat::numeric, 2) as t_stat,
-                ROUND(win_rate * 100, 1) as win_rate_pct,
+                ROUND((win_rate * 100)::numeric, 1) as win_rate_pct,
                 ROUND(information_ratio::numeric, 4) as ir
             FROM factor_analysis
             WHERE horizon = 63 AND sample_size >= 10
